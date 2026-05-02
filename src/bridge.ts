@@ -254,8 +254,10 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
 
   // Tool call tracker for streaming card
   const toolCallTracker = new Map<string, ToolCallInfo>();
+  let currentCycleText = '';
 
   const onPartialText = (fullText: string) => {
+    currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
@@ -269,6 +271,13 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     try {
       ctx.feishu.onToolEvent(msg.chatId, Array.from(toolCallTracker.values()));
     } catch { /* non-critical */ }
+  };
+
+  const onCycleComplete = () => {
+    // Finalize current cycle's card (intermediate, no token footer)
+    ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
+    currentCycleText = '';
+    toolCallTracker.clear();
   };
 
   try {
@@ -288,19 +297,24 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
           binding.codepilotSessionId,
           perm.suggestions,
           msg.messageId,
+          perm.title,
+          perm.displayName,
+          perm.description,
+          perm.decisionReason,
         );
       },
       taskAbort.signal,
       hasAttachments ? msg.attachments : undefined,
       onPartialText,
       onToolEvent,
+      onCycleComplete,
     );
 
     // Finalize streaming card
     let cardFinalized = false;
     try {
       const status = result.hasError ? 'error' : 'completed';
-      cardFinalized = await ctx.feishu.onStreamEnd(msg.chatId, status, result.responseText, result.tokenUsage);
+      cardFinalized = await ctx.feishu.onStreamEnd(msg.chatId, status, currentCycleText || result.responseText, result.tokenUsage);
     } catch (err) {
       console.warn('[bridge] Card finalize failed:', err instanceof Error ? err.message : err);
     }

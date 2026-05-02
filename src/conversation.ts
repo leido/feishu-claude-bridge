@@ -26,6 +26,7 @@ import type {
 export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>;
 export type OnPartialText = (fullText: string) => void;
 export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => void;
+export type OnCycleComplete = () => void;
 
 /**
  * Process an inbound message: send to Claude, consume the response stream,
@@ -40,6 +41,7 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onCycleComplete?: OnCycleComplete,
 ): Promise<ConversationResult> {
   const sessionId = binding.codepilotSessionId;
 
@@ -121,7 +123,7 @@ export async function processMessage(
       files,
     });
 
-    return await consumeStream(ctx, stream, sessionId, onPermissionRequest, onPartialText, onToolEvent);
+    return await consumeStream(ctx, stream, sessionId, onPermissionRequest, onPartialText, onToolEvent, onCycleComplete);
   } finally {
     clearInterval(renewalInterval);
     ctx.store.releaseSessionLock(sessionId, lockId);
@@ -138,6 +140,7 @@ async function consumeStream(
   onPermissionRequest?: OnPermissionRequest,
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  onCycleComplete?: OnCycleComplete,
 ): Promise<ConversationResult> {
   const reader = stream.getReader();
   const contentBlocks: MessageContentBlock[] = [];
@@ -218,6 +221,11 @@ async function consumeStream(
                   onToolEvent(resultData.tool_use_id, '', resultData.is_error ? 'error' : 'complete');
                 } catch { /* non-critical */ }
               }
+              // Cycle boundary: finalize current card and start fresh
+              previewText = '';
+              if (onCycleComplete) {
+                try { onCycleComplete(); } catch { /* non-critical */ }
+              }
             } catch { /* skip */ }
             break;
           }
@@ -230,6 +238,10 @@ async function consumeStream(
                 toolName: permData.toolName,
                 toolInput: permData.toolInput,
                 suggestions: permData.suggestions,
+                title: permData.title,
+                displayName: permData.displayName,
+                description: permData.description,
+                decisionReason: permData.decisionReason,
               };
               permissionRequests.push(perm);
               if (onPermissionRequest) {

@@ -427,6 +427,19 @@ export class FeishuClient {
   }
 
   private updateToolProgress(chatId: string, tools: ToolCallInfo[]): void {
+    if (!this.activeCards.has(chatId)) {
+      const messageId = this.lastIncomingMessageId.get(chatId);
+      this.createStreamingCard(chatId, messageId).then((ok) => {
+        if (ok) {
+          const s = this.activeCards.get(chatId);
+          if (s) {
+            s.toolCalls = tools;
+            this.updateCardContent(chatId, '');
+          }
+        }
+      }).catch(() => {});
+      return;
+    }
     const state = this.activeCards.get(chatId);
     if (!state) return;
     state.toolCalls = tools;
@@ -446,6 +459,9 @@ export class FeishuClient {
 
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return false;
+
+    // Immediately release so a new card can be created for the next cycle
+    this.activeCards.delete(chatId);
 
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
@@ -508,8 +524,6 @@ export class FeishuClient {
       }
       console.warn('[feishu] Card finalize failed:', err instanceof Error ? err.message : err);
       return false;
-    } finally {
-      this.activeCards.delete(chatId);
     }
   }
 
@@ -663,12 +677,13 @@ export class FeishuClient {
     mdText: string,
     permissionRequestId: string,
     replyToMessageId?: string,
+    hasSuggestions?: boolean,
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
-    const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId);
+    const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, hasSuggestions);
 
     try {
       let res;

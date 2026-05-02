@@ -74,6 +74,10 @@ export async function forwardPermissionRequest(
   sessionId?: string,
   suggestions?: unknown[],
   replyToMessageId?: string,
+  title?: string,
+  displayName?: string,
+  description?: string,
+  decisionReason?: string,
 ): Promise<void> {
   // Dedup
   const nowTs = Date.now();
@@ -88,22 +92,11 @@ export async function forwardPermissionRequest(
 
   console.log(`[permissions] Forwarding permission request: ${permissionRequestId} tool=${toolName}`);
 
-  const inputStr = JSON.stringify(toolInput, null, 2);
-  const truncatedInput = inputStr.length > 300
-    ? inputStr.slice(0, 300) + '...'
-    : inputStr;
-
-  const mdText = [
-    `**Permission Required**`,
-    ``,
-    `Tool: \`${toolName}\``,
-    '```',
-    truncatedInput,
-    '```',
-  ].join('\n');
+  const mdText = formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
+  const hasSuggestions = suggestions && suggestions.length > 0;
 
   // Send permission card with action buttons
-  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId);
+  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, hasSuggestions);
 
   // Record the link
   if (result.ok && result.messageId) {
@@ -196,4 +189,122 @@ export function handlePermissionCallback(
   }
 
   return resolved;
+}
+
+// ── Permission Markdown formatting ──────────────────────────
+
+/** Escape markdown special characters for Feishu card markdown. */
+function escapeMd(text: string): string {
+  return text.replace(/([\\`*_|~\[\](){}#!>+-])/g, '\\$1');
+}
+
+interface QuestionOption {
+  label?: string;
+  description?: string;
+  preview?: string;
+}
+
+interface Question {
+  question?: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+interface AllowedPrompt {
+  tool?: string;
+  prompt?: string;
+}
+
+/**
+ * Format permission request markdown for Feishu card display.
+ * Uses human-readable formatting for AskUserQuestion and ExitPlanMode;
+ * falls back to code-block JSON for other tools.
+ */
+function formatPermissionMarkdown(toolName: string, input: Record<string, unknown>, title?: string, description?: string, decisionReason?: string): string {
+  const lower = toolName.toLowerCase();
+
+  if (lower === 'askuserquestion') {
+    return formatAskUserQuestion(input);
+  }
+
+  if (lower === 'exitplanmode') {
+    return formatExitPlanMode(input);
+  }
+
+  // Use SDK-provided title and description when available
+  if (title) {
+    const lines: string[] = [`**${title}**`];
+    if (description) {
+      lines.push('', description);
+    }
+    if (decisionReason) {
+      lines.push('', `_${decisionReason}_`);
+    }
+    const inputStr = JSON.stringify(input, null, 2);
+    const truncated = inputStr.length > 300 ? inputStr.slice(0, 300) + '...' : inputStr;
+    lines.push('', '```', truncated, '```');
+    return lines.join('\n');
+  }
+
+  // Default: raw JSON in code block
+  const inputStr = JSON.stringify(input, null, 2);
+  const truncated = inputStr.length > 300 ? inputStr.slice(0, 300) + '...' : inputStr;
+  return [
+    '**Permission Required**',
+    '',
+    `Tool: \`${toolName}\``,
+    '```',
+    truncated,
+    '```',
+  ].join('\n');
+}
+
+function formatAskUserQuestion(input: Record<string, unknown>): string {
+  const questions = Array.isArray(input.questions) ? input.questions as Question[] : [];
+  const lines: string[] = ['**Permission Required — AskUserQuestion**', ''];
+
+  if (questions.length === 0) {
+    lines.push('_No questions provided_');
+  } else {
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      if (i > 0) lines.push('');
+
+      const header = q.header ? ` \`${escapeMd(q.header)}\`` : '';
+      lines.push(`**Q${i + 1}: ${escapeMd(q.question ?? '')}**${header}`);
+
+      if (Array.isArray(q.options) && q.options.length > 0) {
+        for (const opt of q.options) {
+          const label = opt.label ? `**${escapeMd(opt.label)}**` : '_(unnamed)_';
+          const desc = opt.description ? ` — ${escapeMd(opt.description)}` : '';
+          lines.push(`  • ${label}${desc}`);
+        }
+      }
+
+      if (q.multiSelect) {
+        lines.push('  _(multi-select)_');
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function formatExitPlanMode(input: Record<string, unknown>): string {
+  const prompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts as AllowedPrompt[] : [];
+  const lines: string[] = ['**Permission Required — Exit Plan Mode**', ''];
+
+  if (prompts.length === 0) {
+    lines.push('_No specific permissions requested — approves the plan_');
+  } else {
+    lines.push('Allowed tools:');
+    for (const p of prompts) {
+      const tool = p.tool ? `\`${escapeMd(p.tool)}\`` : '_(unknown)_';
+      const desc = p.prompt ? ` — ${escapeMd(p.prompt)}` : '';
+      lines.push(`  • ${tool}${desc}`);
+    }
+  }
+
+  return lines.join('\n');
 }

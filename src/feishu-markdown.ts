@@ -183,12 +183,20 @@ export function buildPermissionButtonCard(
   text: string,
   permissionRequestId: string,
   chatId?: string,
+  hasSuggestions?: boolean,
 ): string {
   const buttons = [
     { label: 'Allow', type: 'primary', action: 'allow' },
     { label: 'Allow Session', type: 'default', action: 'allow_session' },
-    { label: 'Deny', type: 'danger', action: 'deny' },
   ];
+  if (hasSuggestions) {
+    buttons.push({ label: 'Always Allow', type: 'default', action: 'allow_session' });
+  }
+  buttons.push({ label: 'Deny', type: 'danger', action: 'deny' });
+
+  const shortcutHints = hasSuggestions
+    ? 'Or reply: `1` Allow · `2` Allow Session · `3` Always Allow · `4` Deny'
+    : 'Or reply: `1` Allow · `2` Allow Session · `3` Deny';
 
   const buttonColumns = buttons.map((btn) => ({
     tag: 'column',
@@ -225,9 +233,33 @@ export function buildPermissionButtonCard(
         { tag: 'hr' },
         {
           tag: 'markdown',
-          content: 'Or reply: `1` Allow · `2` Allow Session · `3` Deny',
+          content: shortcutHints,
           text_size: 'notation',
         },
+      ],
+    },
+  });
+}
+
+export function buildPermissionResolvedCard(
+  text: string,
+  action: 'allow' | 'allow_session' | 'deny',
+): string {
+  const statusIcon = action === 'deny' ? '❌ Denied' : '✅ Allowed';
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'Permission Resolved' },
+      template: action === 'deny' ? 'red' : 'green',
+      icon: { tag: 'standard_icon', token: action === 'deny' ? 'reject_filled' : 'approve_filled' },
+      padding: '12px 12px 12px 12px',
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: text, text_size: 'normal' },
+        { tag: 'hr' },
+        { tag: 'markdown', content: statusIcon, text_size: 'normal' },
       ],
     },
   });

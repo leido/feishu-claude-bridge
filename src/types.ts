@@ -161,6 +161,10 @@ export interface PermissionRequestInfo {
   toolName: string;
   toolInput: Record<string, unknown>;
   suggestions?: unknown[];
+  title?: string;
+  displayName?: string;
+  description?: string;
+  decisionReason?: string;
 }
 
 export interface PermissionResult {

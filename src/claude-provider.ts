@@ -307,7 +307,14 @@ export class ClaudeProvider {
               canUseTool: async (
                 toolName: string,
                 input: Record<string, unknown>,
-                opts: { toolUseID: string; suggestions?: string[] },
+                opts: {
+                  toolUseID: string;
+                  suggestions?: unknown[];
+                  title?: string;
+                  displayName?: string;
+                  description?: string;
+                  decisionReason?: string;
+                },
               ): Promise<PermissionResult> => {
                 if (autoApprove) {
                   return { behavior: 'allow' as const, updatedInput: input };
@@ -318,6 +325,10 @@ export class ClaudeProvider {
                     toolName,
                     toolInput: input,
                     suggestions: opts.suggestions || [],
+                    title: opts.title || '',
+                    displayName: opts.displayName || '',
+                    description: opts.description || '',
+                    decisionReason: opts.decisionReason || '',
                   }),
                 );
                 const result = await pendingPerms.waitFor(opts.toolUseID);
