@@ -191,7 +191,7 @@ export async function runBridgeLoop(ctx: AppContext): Promise<void> {
 async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void> {
   // Handle callback queries (permission buttons)
   if (msg.callbackData) {
-    const handled = handlePermissionCallback(ctx, msg.callbackData, msg.chatId, msg.callbackMessageId);
+    const handled = await handlePermissionCallback(ctx, msg.callbackData, msg.chatId, msg.callbackMessageId);
     if (handled) {
       await deliver(ctx, msg.chatId, 'Permission response recorded.');
     }
@@ -232,7 +232,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
           label = `Suggestion ${sugIdx + 1}`;
         }
 
-        const handled = handlePermissionCallback(ctx, callbackData, msg.chatId);
+        const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
         if (handled) {
           await deliver(ctx, msg.chatId, `${label}: recorded.`);
         } else {
@@ -292,12 +292,14 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
-  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'approved' | 'error', input?: Record<string, unknown>) => {
+  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => {
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status, input });
     } else {
       const existing = toolCallTracker.get(toolId);
-      if (existing) existing.status = status;
+      if (existing) {
+        existing.status = status;
+      }
     }
     try {
       ctx.feishu.onToolEvent(msg.chatId, Array.from(toolCallTracker.values()));
@@ -567,7 +569,7 @@ async function handleCommand(
         break;
       }
       const callbackData = `perm:${permAction}:${permId}`;
-      const handled = handlePermissionCallback(ctx, callbackData, msg.chatId);
+      const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
       response = handled
         ? `Permission ${permAction}: recorded.`
         : 'Permission not found or already resolved.';

@@ -58,9 +58,10 @@ export function htmlToFeishuMarkdown(html: string): string {
 export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
-    const icon = tc.status === 'running' ? '🔄' : tc.status === 'approved' ? '☑️' : tc.status === 'complete' ? '✅' : '❌';
+    const icon = tc.status === 'running' ? '🔄' : tc.status === 'error' ? '❌' : '✅';
+    const name = tc.approved ? `[approved] ${tc.name}` : tc.name;
     const detail = formatToolDetail(tc.name, tc.input);
-    return detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
+    return detail ? `${icon} \`${name}\` — ${detail}` : `${icon} \`${name}\``;
   });
   return lines.join('\n');
 }

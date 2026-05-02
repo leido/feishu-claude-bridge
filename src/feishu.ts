@@ -453,7 +453,15 @@ export class FeishuClient {
     }
     const state = this.activeCards.get(chatId);
     if (!state) return;
-    state.toolCalls = tools;
+    // Preserve approved flag from existing tool calls
+    const merged = tools.map((tc) => {
+      const prev = state.toolCalls.find((p) => p.id === tc.id);
+      if (prev?.approved) {
+        return { ...tc, approved: true };
+      }
+      return tc;
+    });
+    state.toolCalls = merged;
     this.updateCardContent(chatId, state.pendingText || '');
   }
 
@@ -850,7 +858,10 @@ export class FeishuClient {
       // Update tool call status: matching tool → ✅/❌, others keep their state
       const updatedTools = tracked.toolCalls.map((tc) => {
         if (tc.id === permissionRequestId) {
-          return { ...tc, status: action === 'allow' ? 'approved' as const : 'error' as const };
+          if (action === 'allow') {
+            return { ...tc, status: 'running' as const, approved: true };
+          }
+          return { ...tc, status: 'error' as const };
         }
         return tc;
       });

@@ -118,12 +118,12 @@ export async function forwardPermissionRequest(
  * Handle a permission callback from an inline button press or text shortcut.
  * Returns true if the callback was recognized and handled.
  */
-export function handlePermissionCallback(
+export async function handlePermissionCallback(
   ctx: AppContext,
   callbackData: string,
   callbackChatId: string,
   callbackMessageId?: string,
-): boolean {
+): Promise<boolean> {
   const parts = callbackData.split(':');
   if (parts.length < 3 || parts[0] !== 'perm') return false;
 
@@ -211,7 +211,7 @@ export function handlePermissionCallback(
   // Update the permission card to show resolved status
   if (resolved) {
     console.log(`[permissions] Permission resolved: ${permissionRequestId}, action=${resolveAction}, chatId=${link.chatId}`);
-    ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
+    await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
   }
 
   return resolved;

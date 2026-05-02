@@ -150,7 +150,9 @@ export interface CliSessionInfo {
 export interface ToolCallInfo {
   id: string;
   name: string;
-  status: 'running' | 'complete' | 'approved' | 'error';
+  status: 'running' | 'complete' | 'error';
+  /** True if this tool call required user permission approval */
+  approved?: boolean;
   input?: Record<string, unknown>;
 }
 
