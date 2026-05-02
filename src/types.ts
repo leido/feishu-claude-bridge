@@ -189,6 +189,7 @@ export interface PermissionLinkRecord {
   permissionRequestId: string;
   chatId: string;
   messageId: string;
+  toolName: string;
   resolved: boolean;
   suggestions: string;
 }

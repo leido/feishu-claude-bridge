@@ -104,6 +104,12 @@ export class FeishuClient {
   private typingReactions = new Map<string, string>();
   private activeCards = new Map<string, CardState>();
   private cardCreatePromises = new Map<string, Promise<boolean>>();
+  private permissionCardIds = new Map<string, {
+    cardId: string;
+    sequence: number;
+    pendingText: string;
+    toolCalls: ToolCallInfo[];
+  }>();
 
   constructor(config: AppContext['config']) {
     this.config = config;
@@ -195,6 +201,7 @@ export class FeishuClient {
     }
     this.activeCards.clear();
     this.cardCreatePromises.clear();
+    this.permissionCardIds.clear();
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
     this.typingReactions.clear();
@@ -683,6 +690,12 @@ export class FeishuClient {
     permissionRequestId: string,
     suggestions?: unknown[],
   ): Promise<SendResult | null> {
+    // Wait for any in-flight card creation before checking activeCards
+    const pending = this.cardCreatePromises.get(chatId);
+    if (pending) {
+      try { await pending; } catch { /* no card */ }
+    }
+
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return null;
 
@@ -723,6 +736,13 @@ export class FeishuClient {
       });
 
       console.log(`[feishu] Permission embedded in streaming card: cardId=${state.cardId}`);
+      // Track card for later resolution update
+      this.permissionCardIds.set(permissionRequestId, {
+        cardId: state.cardId,
+        sequence: state.sequence,
+        pendingText: state.pendingText || '',
+        toolCalls: [...state.toolCalls],
+      });
       return { ok: true, messageId: state.messageId };
     } catch (err) {
       console.warn('[feishu] Failed to embed permission in streaming card:', err instanceof Error ? err.message : err);
@@ -742,7 +762,15 @@ export class FeishuClient {
     }
 
     // Try to embed permission into the active streaming card first
-    const embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
+    let embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
+    if (!embedded) {
+      // No active card — create one and retry embedding
+      const msgId = replyToMessageId || this.lastIncomingMessageId.get(chatId);
+      if (msgId) {
+        await this.createStreamingCard(chatId, msgId);
+        embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
+      }
+    }
     if (embedded) return embedded;
 
     // Fallback: send as a separate card
@@ -788,6 +816,48 @@ export class FeishuClient {
       return { ok: false, error: res?.msg || 'Send failed' };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
+    }
+  }
+
+  /**
+   * Update a permission card to show resolved status (Allowed/Denied).
+   * Preserves original text and tool progress, updates tool icon, removes buttons.
+   */
+  async resolvePermissionCard(
+    permissionRequestId: string,
+    action: 'allow' | 'deny',
+  ): Promise<void> {
+    const tracked = this.permissionCardIds.get(permissionRequestId);
+    if (!tracked || !this.restClient) return;
+    this.permissionCardIds.delete(permissionRequestId);
+
+    try {
+      // Update tool call status: matching tool → ✅/❌, others keep their state
+      const updatedTools = tracked.toolCalls.map((tc) => {
+        if (tc.id === permissionRequestId) {
+          return { ...tc, status: action === 'allow' ? 'complete' as const : 'error' as const };
+        }
+        return tc;
+      });
+
+      const statusLabel = action === 'allow' ? '✅ Allowed' : '❌ Denied';
+      const cardJson = buildFinalCardJson(
+        tracked.pendingText,
+        updatedTools,
+        { status: statusLabel, elapsed: '' },
+      );
+
+      tracked.sequence++;
+      await (this.restClient as any).cardkit.v1.card.update({
+        path: { card_id: tracked.cardId },
+        data: {
+          card: { type: 'card_json', data: cardJson },
+          sequence: tracked.sequence,
+        },
+      });
+      console.log(`[feishu] Permission card resolved: cardId=${tracked.cardId}, action=${action}`);
+    } catch (err) {
+      console.warn('[feishu] Failed to update permission card resolved state:', err instanceof Error ? err.message : err);
     }
   }
 

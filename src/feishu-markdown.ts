@@ -305,7 +305,6 @@ export function buildStreamingPermissionCard(
 
   // Permission section
   elements.push({ tag: 'hr' });
-  elements.push({ tag: 'markdown', content: '**🔐 Permission Required**', text_size: 'normal' });
   if (permText) {
     elements.push({ tag: 'markdown', content: permText, text_size: 'normal' });
   }

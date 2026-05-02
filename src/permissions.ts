@@ -12,7 +12,6 @@ import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionResult, AppContext } from './types.js';
 import {
   buildPermissionButtonCard,
-  formatToolDetail,
 } from './feishu-markdown.js';
 
 export class PendingPermissions {
@@ -169,10 +168,12 @@ export function handlePermissionCallback(
   if (!claimed) return false;
 
   let resolved: boolean;
+  let resolveAction: 'allow' | 'deny' = 'deny';
 
   switch (action) {
     case 'allow':
       resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow' });
+      resolveAction = 'allow';
       break;
 
     case 'sug': {
@@ -189,6 +190,7 @@ export function handlePermissionCallback(
         behavior: 'allow',
         updatedPermissions,
       });
+      resolveAction = 'allow';
       break;
     }
 
@@ -201,6 +203,11 @@ export function handlePermissionCallback(
 
     default:
       return false;
+  }
+
+  // Update the permission card to show resolved status
+  if (resolved) {
+    ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction).catch(() => {});
   }
 
   return resolved;
@@ -236,6 +243,11 @@ interface AllowedPrompt {
  * Uses human-readable formatting for AskUserQuestion and ExitPlanMode;
  * falls back to code-block JSON for other tools.
  */
+/**
+ * Format permission request markdown for Feishu card display.
+ * When embedded in streaming card, tool progress is already shown above,
+ * so only title/description/decisionReason are rendered here.
+ */
 function formatPermissionMarkdown(toolName: string, input: Record<string, unknown>, title?: string, description?: string, decisionReason?: string): string {
   const lower = toolName.toLowerCase();
 
@@ -246,10 +258,6 @@ function formatPermissionMarkdown(toolName: string, input: Record<string, unknow
   if (lower === 'exitplanmode') {
     return formatExitPlanMode(input);
   }
-
-  // Build tool call format: 🔄 `ToolName` — detail
-  const detail = formatToolDetail(toolName, input);
-  const toolLine = detail ? `🔄 \`${toolName}\` — ${detail}` : `🔄 \`${toolName}\``;
 
   const lines: string[] = [];
 
@@ -262,7 +270,6 @@ function formatPermissionMarkdown(toolName: string, input: Record<string, unknow
     lines.push('**Permission Required**');
   }
 
-  lines.push('', toolLine);
   return lines.join('\n');
 }
 

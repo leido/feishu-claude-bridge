@@ -352,6 +352,7 @@ export class JsonFileStore {
       permissionRequestId: link.permissionRequestId,
       chatId: link.chatId,
       messageId: link.messageId,
+      toolName: link.toolName,
       resolved: false,
       suggestions: link.suggestions,
     };
