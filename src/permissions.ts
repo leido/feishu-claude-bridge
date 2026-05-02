@@ -12,6 +12,7 @@ import type { PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionResult, AppContext } from './types.js';
 import {
   buildPermissionButtonCard,
+  formatToolDetail,
 } from './feishu-markdown.js';
 
 export class PendingPermissions {
@@ -232,32 +233,23 @@ function formatPermissionMarkdown(toolName: string, input: Record<string, unknow
     return formatExitPlanMode(input);
   }
 
+  // Build tool call format: 🔄 `ToolName` — detail
+  const detail = formatToolDetail(toolName, input);
+  const toolLine = detail ? `🔄 \`${toolName}\` — ${detail}` : `🔄 \`${toolName}\``;
+
+  const lines: string[] = [];
+
   // Use SDK-provided title and description when available
   if (title) {
-    const lines: string[] = [`**${title}**`];
-    if (description) {
-      lines.push('', description);
-    }
-    if (decisionReason) {
-      lines.push('', `_${decisionReason}_`);
-    }
-    const inputStr = JSON.stringify(input, null, 2);
-    const truncated = inputStr.length > 300 ? inputStr.slice(0, 300) + '...' : inputStr;
-    lines.push('', '```', truncated, '```');
-    return lines.join('\n');
+    lines.push(`**${title}**`);
+    if (description) lines.push('', description);
+    if (decisionReason) lines.push('', `_${decisionReason}_`);
+  } else {
+    lines.push('**Permission Required**');
   }
 
-  // Default: raw JSON in code block
-  const inputStr = JSON.stringify(input, null, 2);
-  const truncated = inputStr.length > 300 ? inputStr.slice(0, 300) + '...' : inputStr;
-  return [
-    '**Permission Required**',
-    '',
-    `Tool: \`${toolName}\``,
-    '```',
-    truncated,
-    '```',
-  ].join('\n');
+  lines.push('', toolLine);
+  return lines.join('\n');
 }
 
 function formatAskUserQuestion(input: Record<string, unknown>): string {

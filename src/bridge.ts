@@ -255,8 +255,15 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   // Tool call tracker for streaming card
   const toolCallTracker = new Map<string, ToolCallInfo>();
   let currentCycleText = '';
+  let firstTextSeen = false;
 
   const onPartialText = (fullText: string) => {
+    // First text arriving after initial tool calls → finalize the tools-only card, start fresh
+    if (!firstTextSeen && fullText.trim() && toolCallTracker.size > 0) {
+      ctx.feishu.finalizeCard(msg.chatId, 'completed', '', null).catch(() => {});
+      toolCallTracker.clear();
+    }
+    if (fullText.trim()) firstTextSeen = true;
     currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
@@ -274,10 +281,15 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   };
 
   const onCycleComplete = () => {
-    // Finalize current cycle's card (intermediate, no token footer)
-    ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
-    currentCycleText = '';
-    toolCallTracker.clear();
+    // Only finalize if we've had text — skip empty tool-only cycles
+    if (firstTextSeen) {
+      ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
+      currentCycleText = '';
+      toolCallTracker.clear();
+    } else {
+      // Pre-text tool cycles: just clear tools, keep the same card for next tools
+      toolCallTracker.clear();
+    }
   };
 
   try {

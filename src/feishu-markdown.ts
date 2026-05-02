@@ -65,7 +65,7 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   return lines.join('\n');
 }
 
-function formatToolDetail(name: string, input?: Record<string, unknown>): string {
+export function formatToolDetail(name: string, input?: Record<string, unknown>): string {
   if (!input) return '';
   const n = name.toLowerCase();
 
@@ -179,36 +179,44 @@ export function buildFinalCardJson(
   });
 }
 
+function buildPermButtons(
+  permissionRequestId: string,
+  chatId?: string,
+  hasSuggestions?: boolean,
+): { elements: Array<Record<string, unknown>>; hints: string } {
+  const buttons = [
+    { label: '✅ Allow', type: 'primary', action: 'allow' },
+    { label: 'Allow Session', type: 'default', action: 'allow_session' },
+  ];
+  if (hasSuggestions) {
+    buttons.push({ label: 'Always Allow', type: 'default', action: 'allow_session' });
+  }
+  buttons.push({ label: '❌ Deny', type: 'danger', action: 'deny' });
+
+  const hints = hasSuggestions
+    ? 'Or reply: `1` Allow · `2` Allow Session · `3` Always Allow · `4` Deny'
+    : 'Or reply: `1` Allow · `2` Allow Session · `3` Deny';
+
+  // Schema 2.0: buttons are direct elements with behaviors for callback
+  const buttonElements = buttons.map((btn) => ({
+    tag: 'button',
+    type: btn.type === 'primary' ? 'primary_filled' : btn.type,
+    size: 'medium',
+    width: 'fill',
+    text: { tag: 'plain_text', content: btn.label },
+    behaviors: [{ type: 'callback', value: { callback_data: `perm:${btn.action}:${permissionRequestId}`, ...(chatId ? { chatId } : {}) } }],
+  }));
+
+  return { elements: buttonElements, hints };
+}
+
 export function buildPermissionButtonCard(
   text: string,
   permissionRequestId: string,
   chatId?: string,
   hasSuggestions?: boolean,
 ): string {
-  const buttons = [
-    { label: 'Allow', type: 'primary', action: 'allow' },
-    { label: 'Allow Session', type: 'default', action: 'allow_session' },
-  ];
-  if (hasSuggestions) {
-    buttons.push({ label: 'Always Allow', type: 'default', action: 'allow_session' });
-  }
-  buttons.push({ label: 'Deny', type: 'danger', action: 'deny' });
-
-  const shortcutHints = hasSuggestions
-    ? 'Or reply: `1` Allow · `2` Allow Session · `3` Always Allow · `4` Deny'
-    : 'Or reply: `1` Allow · `2` Allow Session · `3` Deny';
-
-  const buttonColumns = buttons.map((btn) => ({
-    tag: 'column',
-    width: 'auto',
-    elements: [{
-      tag: 'button',
-      text: { tag: 'plain_text', content: btn.label },
-      type: btn.type,
-      size: 'medium',
-      value: { callback_data: `perm:${btn.action}:${permissionRequestId}`, ...(chatId ? { chatId } : {}) },
-    }],
-  }));
+  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, hasSuggestions);
 
   return JSON.stringify({
     schema: '2.0',
@@ -222,20 +230,10 @@ export function buildPermissionButtonCard(
     body: {
       elements: [
         { tag: 'markdown', content: text, text_size: 'normal' },
-        { tag: 'markdown', content: '⏱ This request will expire in 5 minutes', text_size: 'notation' },
+        { tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' },
         { tag: 'hr' },
-        {
-          tag: 'column_set',
-          flex_mode: 'none',
-          horizontal_align: 'left',
-          columns: buttonColumns,
-        },
-        { tag: 'hr' },
-        {
-          tag: 'markdown',
-          content: shortcutHints,
-          text_size: 'notation',
-        },
+        ...buttonElements,
+        { tag: 'markdown', content: hints, text_size: 'notation' },
       ],
     },
   });
@@ -262,5 +260,46 @@ export function buildPermissionResolvedCard(
         { tag: 'markdown', content: statusIcon, text_size: 'normal' },
       ],
     },
+  });
+}
+
+export function buildStreamingPermissionCard(
+  responseText: string,
+  tools: ToolCallInfo[],
+  permText: string,
+  permissionRequestId: string,
+  chatId?: string,
+  hasSuggestions?: boolean,
+): string {
+  const elements: Array<Record<string, unknown>> = [];
+
+  // Current response text + tool progress
+  let content = preprocessFeishuMarkdown(responseText);
+  const toolMd = buildToolProgressMarkdown(tools);
+  if (toolMd) {
+    content = content ? `${content}\n\n${toolMd}` : toolMd;
+  }
+  if (content) {
+    elements.push({ tag: 'markdown', content, text_align: 'left', text_size: 'normal' });
+  }
+
+  // Permission section
+  elements.push({ tag: 'hr' });
+  elements.push({ tag: 'markdown', content: '**🔐 Permission Required**', text_size: 'normal' });
+  if (permText) {
+    elements.push({ tag: 'markdown', content: permText, text_size: 'normal' });
+  }
+  elements.push({ tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' });
+
+  // Buttons (reuse shared helper)
+  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, hasSuggestions);
+  elements.push({ tag: 'hr' });
+  elements.push(...buttonElements);
+  elements.push({ tag: 'markdown', content: hints, text_size: 'notation' });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    body: { elements },
   });
 }

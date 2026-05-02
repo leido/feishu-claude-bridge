@@ -28,6 +28,7 @@ import {
   buildStreamingContent,
   buildFinalCardJson,
   buildPermissionButtonCard,
+  buildStreamingPermissionCard,
   formatElapsed,
   formatTokenCount,
 } from './feishu-markdown.js';
@@ -672,6 +673,63 @@ export class FeishuClient {
 
   // ── Permission Card ────────────────────────────────────────
 
+  /**
+   * Embed permission buttons into the active streaming card.
+   * Returns the card's messageId if successful, null otherwise.
+   */
+  private async embedPermissionInActiveCard(
+    chatId: string,
+    permMdText: string,
+    permissionRequestId: string,
+    hasSuggestions?: boolean,
+  ): Promise<SendResult | null> {
+    const state = this.activeCards.get(chatId);
+    if (!state || !this.restClient) return null;
+
+    // Remove from activeCards immediately so new cards can be created after approval
+    this.activeCards.delete(chatId);
+    if (state.throttleTimer) {
+      clearTimeout(state.throttleTimer);
+      state.throttleTimer = null;
+    }
+
+    try {
+      // Disable streaming mode
+      state.sequence++;
+      await (this.restClient as any).cardkit.v1.card.settings({
+        path: { card_id: state.cardId },
+        data: {
+          settings: JSON.stringify({ config: { streaming_mode: false } }),
+          sequence: state.sequence,
+        },
+      });
+
+      // Replace card with response text + tool progress + permission buttons
+      const cardJson = buildStreamingPermissionCard(
+        state.pendingText || '',
+        state.toolCalls,
+        permMdText,
+        permissionRequestId,
+        chatId,
+        hasSuggestions,
+      );
+      state.sequence++;
+      await (this.restClient as any).cardkit.v1.card.update({
+        path: { card_id: state.cardId },
+        data: {
+          card: { type: 'card_json', data: cardJson },
+          sequence: state.sequence,
+        },
+      });
+
+      console.log(`[feishu] Permission embedded in streaming card: cardId=${state.cardId}`);
+      return { ok: true, messageId: state.messageId };
+    } catch (err) {
+      console.warn('[feishu] Failed to embed permission in streaming card:', err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
   async sendPermissionCard(
     chatId: string,
     mdText: string,
@@ -683,6 +741,11 @@ export class FeishuClient {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
+    // Try to embed permission into the active streaming card first
+    const embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, hasSuggestions);
+    if (embedded) return embedded;
+
+    // Fallback: send as a separate card
     const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, hasSuggestions);
 
     try {
@@ -706,7 +769,7 @@ export class FeishuClient {
       console.warn('[feishu] Permission card error, falling back to text:', err instanceof Error ? err.message : err);
     }
 
-    // Fallback: plain text with reply instructions
+    // Final fallback: plain text
     const plainText = [
       mdText,
       '',
