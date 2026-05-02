@@ -1,5 +1,16 @@
 # Feishu Claude Bridge
 
+> **Fork of [PI-33/feishu-claude-bridge](https://github.com/PI-33/feishu-claude-bridge)**
+>
+> ### Fork 改动
+>
+> - **流式卡片增强** — 按 tool cycle 拆分卡片，tool 调用详情（文件路径、命令等）实时展示在卡片中
+> - **权限审批嵌入卡片** — 权限请求嵌入到当前流式卡片内，审批后卡片继续流式更新（不产生重复卡片）
+> - **动态权限按钮** — 根据 SDK suggestions 动态生成按钮（Allow for session / Always allow 等），`updatedPermissions` 正确传递回 SDK
+> - **Tool 状态图标区分** — 🔄 运行中、✅ 正常完成、☑️ 审批通过、❌ 出错
+> - **Tool-only cycle 合并** — 纯 tool 调用（无文字）的 cycle 不单独生成卡片，与后续文字合并为一张
+> - **修复类型错误** — `updatedPermissions` 类型正确传递、`resolve()` 签名扩展
+
 将 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI 会话桥接到飞书 / Lark，在手机或桌面飞书上与 Claude Code 实时对话。
 
 **核心特性：**
