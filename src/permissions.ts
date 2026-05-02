@@ -94,10 +94,9 @@ export async function forwardPermissionRequest(
   console.log(`[permissions] Forwarding permission request: ${permissionRequestId} tool=${toolName}`);
 
   const mdText = formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
-  const hasSuggestions = suggestions && suggestions.length > 0;
 
   // Send permission card with action buttons
-  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, hasSuggestions);
+  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, suggestions);
 
   // Record the link
   if (result.ok && result.messageId) {
@@ -127,7 +126,18 @@ export function handlePermissionCallback(
   if (parts.length < 3 || parts[0] !== 'perm') return false;
 
   const action = parts[1];
-  const permissionRequestId = parts.slice(2).join(':');
+  // Parse permissionRequestId: for 'sug:N:id', id starts at parts[3]
+  let permissionRequestId: string;
+  let suggestionIndex = -1;
+
+  if (action === 'sug') {
+    if (parts.length < 4) return false;
+    suggestionIndex = parseInt(parts[2], 10);
+    if (isNaN(suggestionIndex) || suggestionIndex < 0) return false;
+    permissionRequestId = parts.slice(3).join(':');
+  } else {
+    permissionRequestId = parts.slice(2).join(':');
+  }
 
   const link = ctx.store.getPermissionLink(permissionRequestId);
   if (!link) {
@@ -165,16 +175,20 @@ export function handlePermissionCallback(
       resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow' });
       break;
 
-    case 'allow_session': {
+    case 'sug': {
       let updatedPermissions: PermissionUpdate[] | undefined;
       if (link.suggestions) {
         try {
-          updatedPermissions = JSON.parse(link.suggestions) as PermissionUpdate[];
+          const all = JSON.parse(link.suggestions) as PermissionUpdate[];
+          if (Array.isArray(all) && suggestionIndex < all.length) {
+            updatedPermissions = [all[suggestionIndex]];
+          }
         } catch { /* fall through */ }
       }
-      // For allow_session we still just resolve as 'allow' — the SDK handles
-      // updatedPermissions through its own PermissionResult type
-      resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow' });
+      resolved = ctx.permissions.resolve(permissionRequestId, {
+        behavior: 'allow',
+        updatedPermissions,
+      });
       break;
     }
 

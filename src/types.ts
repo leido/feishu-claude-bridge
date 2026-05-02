@@ -170,6 +170,7 @@ export interface PermissionRequestInfo {
 export interface PermissionResult {
   behavior: 'allow' | 'deny';
   message?: string;
+  updatedPermissions?: unknown[];
 }
 
 // ── Permission Link ──────────────────────────────────────────

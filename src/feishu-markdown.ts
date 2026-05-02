@@ -179,34 +179,54 @@ export function buildFinalCardJson(
   });
 }
 
+interface PermissionSuggestion {
+  type: string;
+  destination?: string;
+  [key: string]: unknown;
+}
+
+const DESTINATION_LABELS: Record<string, string> = {
+  session: 'Allow for session',
+  projectSettings: 'Allow for project',
+  localSettings: 'Allow locally',
+  userSettings: 'Always allow',
+  cliArg: 'Allow',
+};
+
 function buildPermButtons(
   permissionRequestId: string,
   chatId?: string,
-  hasSuggestions?: boolean,
+  suggestions?: unknown[],
 ): { elements: Array<Record<string, unknown>>; hints: string } {
-  const buttons = [
-    { label: '✅ Allow', type: 'primary', action: 'allow' },
-    { label: 'Allow Session', type: 'default', action: 'allow_session' },
+  const buttons: Array<{ label: string; type: string; action: string }> = [
+    { label: 'Allow once', type: 'primary_filled', action: 'allow' },
   ];
-  if (hasSuggestions) {
-    buttons.push({ label: 'Always Allow', type: 'default', action: 'allow_session' });
-  }
-  buttons.push({ label: '❌ Deny', type: 'danger', action: 'deny' });
 
-  const hints = hasSuggestions
-    ? 'Or reply: `1` Allow · `2` Allow Session · `3` Always Allow · `4` Deny'
-    : 'Or reply: `1` Allow · `2` Allow Session · `3` Deny';
+  const sugHints: string[] = ['`1` Allow once'];
+
+  if (Array.isArray(suggestions)) {
+    for (let i = 0; i < suggestions.length; i++) {
+      const sug = suggestions[i] as PermissionSuggestion;
+      const label = DESTINATION_LABELS[sug.destination ?? ''] ?? `Allow (${sug.destination ?? 'unknown'})`;
+      buttons.push({ label, type: 'primary', action: `sug:${i}` });
+      sugHints.push(`\`${i + 2}\` ${label}`);
+    }
+  }
+
+  buttons.push({ label: 'Deny', type: 'danger', action: 'deny' });
+  sugHints.push(`\`${buttons.length}\` Deny`);
 
   // Schema 2.0: buttons are direct elements with behaviors for callback
   const buttonElements = buttons.map((btn) => ({
     tag: 'button',
-    type: btn.type === 'primary' ? 'primary_filled' : btn.type,
+    type: btn.type,
     size: 'medium',
     width: 'fill',
     text: { tag: 'plain_text', content: btn.label },
     behaviors: [{ type: 'callback', value: { callback_data: `perm:${btn.action}:${permissionRequestId}`, ...(chatId ? { chatId } : {}) } }],
   }));
 
+  const hints = `Or reply: ${sugHints.join(' · ')}`;
   return { elements: buttonElements, hints };
 }
 
@@ -214,9 +234,9 @@ export function buildPermissionButtonCard(
   text: string,
   permissionRequestId: string,
   chatId?: string,
-  hasSuggestions?: boolean,
+  suggestions?: unknown[],
 ): string {
-  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, hasSuggestions);
+  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, suggestions);
 
   return JSON.stringify({
     schema: '2.0',
@@ -269,7 +289,7 @@ export function buildStreamingPermissionCard(
   permText: string,
   permissionRequestId: string,
   chatId?: string,
-  hasSuggestions?: boolean,
+  suggestions?: unknown[],
 ): string {
   const elements: Array<Record<string, unknown>> = [];
 
@@ -292,7 +312,7 @@ export function buildStreamingPermissionCard(
   elements.push({ tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' });
 
   // Buttons (reuse shared helper)
-  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, hasSuggestions);
+  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, suggestions);
   elements.push({ tag: 'hr' });
   elements.push(...buttonElements);
   elements.push({ tag: 'markdown', content: hints, text_size: 'notation' });

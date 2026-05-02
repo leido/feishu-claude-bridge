@@ -73,7 +73,7 @@ const activeTasks = new Map<string, AbortController>();
 
 function isNumericPermissionShortcut(ctx: AppContext, rawText: string, chatId: string): boolean {
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (!/^[123]$/.test(normalized)) return false;
+  if (!/^\d+$/.test(normalized)) return false;
   const pending = ctx.store.listPendingPermissionLinksByChat(chatId);
   return pending.length > 0;
 }
@@ -203,27 +203,47 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
 
   if (!rawText && !hasAttachments) return;
 
-  // Numeric shortcut for permission replies (1/2/3)
+  // Numeric shortcut for permission replies (1=allow, 2..N=suggestions, last=deny)
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (/^[123]$/.test(normalized)) {
+  if (/^\d+$/.test(normalized)) {
     const pendingLinks = ctx.store.listPendingPermissionLinksByChat(msg.chatId);
     if (pendingLinks.length === 1) {
-      const actionMap: Record<string, string> = { '1': 'allow', '2': 'allow_session', '3': 'deny' };
-      const action = actionMap[normalized];
-      const permId = pendingLinks[0].permissionRequestId;
-      const callbackData = `perm:${action}:${permId}`;
-      const handled = handlePermissionCallback(ctx, callbackData, msg.chatId);
-      const label = normalized === '1' ? 'Allow' : normalized === '2' ? 'Allow Session' : 'Deny';
-      if (handled) {
-        await deliver(ctx, msg.chatId, `${label}: recorded.`);
+      const link = pendingLinks[0];
+      const sugCount = link.suggestions ? (() => { try { return JSON.parse(link.suggestions).length; } catch { return 0; } })() : 0;
+      const totalButtons = 1 + sugCount + 1; // allow + suggestions + deny
+      const num = parseInt(normalized, 10);
+
+      if (num < 1 || num > totalButtons) {
+        // Not a valid shortcut → fall through
       } else {
-        await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
+        let callbackData: string;
+        let label: string;
+        const permId = link.permissionRequestId;
+
+        if (num === 1) {
+          callbackData = `perm:allow:${permId}`;
+          label = 'Allow once';
+        } else if (num === totalButtons) {
+          callbackData = `perm:deny:${permId}`;
+          label = 'Deny';
+        } else {
+          const sugIdx = num - 2;
+          callbackData = `perm:sug:${sugIdx}:${permId}`;
+          label = `Suggestion ${sugIdx + 1}`;
+        }
+
+        const handled = handlePermissionCallback(ctx, callbackData, msg.chatId);
+        if (handled) {
+          await deliver(ctx, msg.chatId, `${label}: recorded.`);
+        } else {
+          await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
+        }
+        return;
       }
-      return;
     }
     if (pendingLinks.length > 1) {
       await deliver(ctx, msg.chatId,
-        `Multiple pending permissions (${pendingLinks.length}). Use /perm allow|allow_session|deny <id>`,
+        `Multiple pending permissions (${pendingLinks.length}). Use /perm allow|sug <idx>|deny <id>`,
       );
       return;
     }

@@ -681,7 +681,7 @@ export class FeishuClient {
     chatId: string,
     permMdText: string,
     permissionRequestId: string,
-    hasSuggestions?: boolean,
+    suggestions?: unknown[],
   ): Promise<SendResult | null> {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return null;
@@ -711,7 +711,7 @@ export class FeishuClient {
         permMdText,
         permissionRequestId,
         chatId,
-        hasSuggestions,
+        suggestions,
       );
       state.sequence++;
       await (this.restClient as any).cardkit.v1.card.update({
@@ -735,18 +735,18 @@ export class FeishuClient {
     mdText: string,
     permissionRequestId: string,
     replyToMessageId?: string,
-    hasSuggestions?: boolean,
+    suggestions?: unknown[],
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
     // Try to embed permission into the active streaming card first
-    const embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, hasSuggestions);
+    const embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
     if (embedded) return embedded;
 
     // Fallback: send as a separate card
-    const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, hasSuggestions);
+    const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, suggestions);
 
     try {
       let res;
