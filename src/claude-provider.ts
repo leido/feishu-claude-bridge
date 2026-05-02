@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, PermissionResult, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
 import type { PendingPermissions } from './permissions.js';
 import type { StreamChatParams, FileAttachment } from './types.js';
 
@@ -336,7 +336,7 @@ export class ClaudeProvider {
                   return {
                     behavior: 'allow' as const,
                     updatedInput: input,
-                    ...(result.updatedPermissions ? { updatedPermissions: result.updatedPermissions } : {}),
+                    ...(result.updatedPermissions ? { updatedPermissions: result.updatedPermissions as PermissionUpdate[] } : {}),
                   };
                 }
                 return {

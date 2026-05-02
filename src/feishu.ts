@@ -29,6 +29,7 @@ import {
   buildFinalCardJson,
   buildPermissionButtonCard,
   buildStreamingPermissionCard,
+  buildPermResolvedStreamingCard,
   formatElapsed,
   formatTokenCount,
 } from './feishu-markdown.js';
@@ -110,6 +111,7 @@ export class FeishuClient {
     pendingText: string;
     toolCalls: ToolCallInfo[];
   }>();
+  private resolvedPermissionChats = new Set<string>();
 
   constructor(config: AppContext['config']) {
     this.config = config;
@@ -202,6 +204,7 @@ export class FeishuClient {
     this.activeCards.clear();
     this.cardCreatePromises.clear();
     this.permissionCardIds.clear();
+    this.resolvedPermissionChats.clear();
     this.seenMessageIds.clear();
     this.lastIncomingMessageId.clear();
     this.typingReactions.clear();
@@ -693,11 +696,16 @@ export class FeishuClient {
     // Wait for any in-flight card creation before checking activeCards
     const pending = this.cardCreatePromises.get(chatId);
     if (pending) {
+      console.log(`[feishu] embedPerm: awaiting cardCreatePromise for ${chatId}`);
       try { await pending; } catch { /* no card */ }
     }
 
     const state = this.activeCards.get(chatId);
-    if (!state || !this.restClient) return null;
+    if (!state || !this.restClient) {
+      console.log(`[feishu] embedPerm: no active card for ${chatId} (hasCard=${!!state}, hasRest=${!!this.restClient})`);
+      return null;
+    }
+    console.log(`[feishu] embedPerm: found active card ${state.cardId} for ${chatId}`);
 
     // Remove from activeCards immediately so new cards can be created after approval
     this.activeCards.delete(chatId);
@@ -766,6 +774,7 @@ export class FeishuClient {
     if (!embedded) {
       // No active card — create one and retry embedding
       const msgId = replyToMessageId || this.lastIncomingMessageId.get(chatId);
+      console.log(`[feishu] sendPermCard: embed failed, creating new card (msgId=${!!msgId})`);
       if (msgId) {
         await this.createStreamingCard(chatId, msgId);
         embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
@@ -821,30 +830,38 @@ export class FeishuClient {
 
   /**
    * Update a permission card to show resolved status (Allowed/Denied).
-   * Preserves original text and tool progress, updates tool icon, removes buttons.
+   * Re-enables streaming and re-adds to activeCards so continuation text
+   * flows into the same card instead of creating a duplicate.
    */
   async resolvePermissionCard(
     permissionRequestId: string,
     action: 'allow' | 'deny',
-  ): Promise<void> {
+    chatId: string,
+  ): Promise<boolean> {
     const tracked = this.permissionCardIds.get(permissionRequestId);
-    if (!tracked || !this.restClient) return;
+    if (!tracked || !this.restClient) {
+      console.log(`[feishu] resolvePermCard: no tracked card for ${permissionRequestId} (tracked=${!!tracked})`);
+      return false;
+    }
     this.permissionCardIds.delete(permissionRequestId);
+    console.log(`[feishu] resolvePermCard: updating card ${tracked.cardId}, action=${action}, textLen=${tracked.pendingText.length}, tools=${tracked.toolCalls.length}`);
 
     try {
       // Update tool call status: matching tool → ✅/❌, others keep their state
       const updatedTools = tracked.toolCalls.map((tc) => {
         if (tc.id === permissionRequestId) {
-          return { ...tc, status: action === 'allow' ? 'complete' as const : 'error' as const };
+          return { ...tc, status: action === 'allow' ? 'approved' as const : 'error' as const };
         }
         return tc;
       });
 
-      const statusLabel = action === 'allow' ? '✅ Allowed' : '❌ Denied';
-      const cardJson = buildFinalCardJson(
+      // Build card with resolved status but keep streaming_mode enabled
+      // so continuation text updates this same card
+      const cardJson = buildPermResolvedStreamingCard(
         tracked.pendingText,
         updatedTools,
-        { status: statusLabel, elapsed: '' },
+        '',
+        action,
       );
 
       tracked.sequence++;
@@ -855,10 +872,31 @@ export class FeishuClient {
           sequence: tracked.sequence,
         },
       });
-      console.log(`[feishu] Permission card resolved: cardId=${tracked.cardId}, action=${action}`);
+
+      // Re-add to activeCards so continuation text streams here instead of creating a new card
+      this.activeCards.set(chatId, {
+        cardId: tracked.cardId,
+        messageId: '', // already sent, not needed for streaming updates
+        sequence: tracked.sequence,
+        startTime: Date.now(),
+        toolCalls: updatedTools,
+        thinking: false,
+        pendingText: tracked.pendingText || null,
+        lastUpdateAt: Date.now(),
+        throttleTimer: null,
+      });
+
+      console.log(`[feishu] Permission card resolved & reactivated: cardId=${tracked.cardId}, action=${action}`);
+      return true;
     } catch (err) {
       console.warn('[feishu] Failed to update permission card resolved state:', err instanceof Error ? err.message : err);
+      return false;
     }
+  }
+
+  /** Check if a permission card was resolved for this chat (consumes the flag). */
+  consumePermissionResolved(chatId: string): boolean {
+    return this.resolvedPermissionChats.delete(chatId);
   }
 
   // ── Authorization ──────────────────────────────────────────

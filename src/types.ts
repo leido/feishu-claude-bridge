@@ -150,7 +150,7 @@ export interface CliSessionInfo {
 export interface ToolCallInfo {
   id: string;
   name: string;
-  status: 'running' | 'complete' | 'error';
+  status: 'running' | 'complete' | 'approved' | 'error';
   input?: Record<string, unknown>;
 }
 

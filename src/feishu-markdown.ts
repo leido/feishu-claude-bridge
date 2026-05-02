@@ -58,7 +58,7 @@ export function htmlToFeishuMarkdown(html: string): string {
 export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
-    const icon = tc.status === 'running' ? '🔄' : tc.status === 'complete' ? '✅' : '❌';
+    const icon = tc.status === 'running' ? '🔄' : tc.status === 'approved' ? '☑️' : tc.status === 'complete' ? '✅' : '❌';
     const detail = formatToolDetail(tc.name, tc.input);
     return detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
   });
@@ -320,5 +320,37 @@ export function buildStreamingPermissionCard(
     schema: '2.0',
     config: { wide_screen_mode: true },
     body: { elements },
+  });
+}
+
+/**
+ * Build a card after permission is resolved — just normal streaming content
+ * with updated tool icons (🔄→✅/❌). No text status line since it would be
+ * overwritten by subsequent streaming updates anyway.
+ */
+export function buildPermResolvedStreamingCard(
+  responseText: string,
+  tools: ToolCallInfo[],
+  _permText: string,
+  _action: 'allow' | 'deny',
+): string {
+  let content = preprocessFeishuMarkdown(responseText);
+  const toolMd = buildToolProgressMarkdown(tools);
+  if (toolMd) {
+    content = content ? `${content}\n\n${toolMd}` : toolMd;
+  }
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { streaming_mode: true, wide_screen_mode: true },
+    body: {
+      elements: [{
+        tag: 'markdown',
+        content: content || '💭 Thinking...',
+        text_align: 'left',
+        text_size: 'normal',
+        element_id: 'streaming_content',
+      }],
+    },
   });
 }

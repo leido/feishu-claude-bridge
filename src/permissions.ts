@@ -31,12 +31,15 @@ export class PendingPermissions {
     });
   }
 
-  resolve(permissionRequestId: string, resolution: { behavior: 'allow' | 'deny'; message?: string }): boolean {
+  resolve(permissionRequestId: string, resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[] }): boolean {
     const entry = this.pending.get(permissionRequestId);
     if (!entry) return false;
     clearTimeout(entry.timer);
     if (resolution.behavior === 'allow') {
-      entry.resolve({ behavior: 'allow' });
+      entry.resolve({
+        behavior: 'allow',
+        ...(resolution.updatedPermissions ? { updatedPermissions: resolution.updatedPermissions } : {}),
+      });
     } else {
       entry.resolve({ behavior: 'deny', message: resolution.message || 'Denied by user' });
     }
@@ -207,7 +210,8 @@ export function handlePermissionCallback(
 
   // Update the permission card to show resolved status
   if (resolved) {
-    ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction).catch(() => {});
+    console.log(`[permissions] Permission resolved: ${permissionRequestId}, action=${resolveAction}, chatId=${link.chatId}`);
+    ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
   }
 
   return resolved;

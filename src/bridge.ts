@@ -276,6 +276,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   const toolCallTracker = new Map<string, ToolCallInfo>();
   let currentCycleText = '';
   let firstTextSeen = false;
+  let cycleHasText = false;
 
   const onPartialText = (fullText: string) => {
     // First text arriving after initial tool calls → finalize the tools-only card, start fresh
@@ -283,12 +284,15 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
       ctx.feishu.finalizeCard(msg.chatId, 'completed', '', null).catch(() => {});
       toolCallTracker.clear();
     }
-    if (fullText.trim()) firstTextSeen = true;
+    if (fullText.trim()) {
+      firstTextSeen = true;
+      cycleHasText = true;
+    }
     currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
-  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => {
+  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'approved' | 'error', input?: Record<string, unknown>) => {
     if (toolName) {
       toolCallTracker.set(toolId, { id: toolId, name: toolName, status, input });
     } else {
@@ -301,15 +305,17 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   };
 
   const onCycleComplete = () => {
-    // Only finalize if we've had text — skip empty tool-only cycles
-    if (firstTextSeen) {
+    // Only finalize if this cycle produced text — tool-only cycles keep the card active
+    // so the next cycle's text flows into the same card
+    if (cycleHasText) {
       ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
       currentCycleText = '';
       toolCallTracker.clear();
     } else {
-      // Pre-text tool cycles: just clear tools, keep the same card for next tools
+      // Tool-only cycle: just clear tools, keep the card active for next cycle
       toolCallTracker.clear();
     }
+    cycleHasText = false;
   };
 
   try {
@@ -347,18 +353,23 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     try {
       const status = result.hasError ? 'error' : 'completed';
       cardFinalized = await ctx.feishu.onStreamEnd(msg.chatId, status, currentCycleText || result.responseText, result.tokenUsage);
+      console.log(`[bridge] onStreamEnd: cardFinalized=${cardFinalized}, textLen=${(currentCycleText || result.responseText).length}`);
     } catch (err) {
       console.warn('[bridge] Card finalize failed:', err instanceof Error ? err.message : err);
     }
 
-    // Send response text (skip if card was finalized)
+    // Send response text (skip if card was finalized or permission card already displayed content)
+    const permResolved = ctx.feishu.consumePermissionResolved(msg.chatId);
     if (result.responseText) {
-      if (!cardFinalized) {
+      if (!cardFinalized && !permResolved) {
+        console.log(`[bridge] Delivering response text: ${result.responseText.length} chars (no card, no perm resolved)`);
         await deliver(ctx, msg.chatId, result.responseText, {
           sessionId: binding.codepilotSessionId,
           parseMode: 'Markdown',
           replyToMessageId: msg.messageId,
         });
+      } else {
+        console.log(`[bridge] Skipping deliver: cardFinalized=${cardFinalized}, permResolved=${permResolved}`);
       }
     } else if (result.hasError) {
       const errorText = `**Error:** ${result.errorMessage}`;
