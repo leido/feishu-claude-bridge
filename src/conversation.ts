@@ -25,7 +25,7 @@ import type {
 
 export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>;
 export type OnPartialText = (fullText: string) => void;
-export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => void;
+export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => void;
 
 /**
  * Process an inbound message: send to Claude, consume the response stream,
@@ -189,7 +189,7 @@ async function consumeStream(
                 input: toolData.input,
               });
               if (onToolEvent) {
-                try { onToolEvent(toolData.id, toolData.name, 'running'); } catch { /* non-critical */ }
+                try { onToolEvent(toolData.id, toolData.name, 'running', toolData.input); } catch { /* non-critical */ }
               }
             } catch { /* skip */ }
             break;

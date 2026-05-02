@@ -59,9 +59,54 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'complete' ? '✅' : '❌';
-    return `${icon} \`${tc.name}\``;
+    const detail = formatToolDetail(tc.name, tc.input);
+    return detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
   });
   return lines.join('\n');
+}
+
+function formatToolDetail(name: string, input?: Record<string, unknown>): string {
+  if (!input) return '';
+  const n = name.toLowerCase();
+
+  // File operations
+  if (n === 'read' || n === 'edit') {
+    return `\`${input.file_path ?? input.path ?? ''}\``;
+  }
+  if (n === 'write') {
+    return `\`${input.file_path ?? ''}\``;
+  }
+  if (n === 'glob') {
+    return `\`${input.pattern ?? ''}\``;
+  }
+
+  // Search
+  if (n === 'grep') {
+    const pat = input.pattern ?? '';
+    const glob = input.glob ?? '';
+    return glob ? `/\`${pat}\` in \`${glob}\`` : `/\`${pat}\``;
+  }
+
+  // Shell
+  if (n === 'bash') {
+    const cmd = String(input.command ?? '');
+    const preview = cmd.length > 60 ? cmd.slice(0, 60) + '...' : cmd;
+    return `\`${preview}\``;
+  }
+
+  // Agent
+  if (n === 'agent' || n === 'todo_write' || n === 'todo_read') {
+    return '';
+  }
+
+  // Generic: show first meaningful field
+  for (const val of Object.values(input)) {
+    if (typeof val === 'string' && val) {
+      const preview = val.length > 60 ? val.slice(0, 60) + '...' : val;
+      return `\`${preview}\``;
+    }
+  }
+  return '';
 }
 
 export function formatElapsed(ms: number): string {

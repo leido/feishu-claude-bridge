@@ -259,9 +259,9 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
-  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error') => {
+  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => {
     if (toolName) {
-      toolCallTracker.set(toolId, { id: toolId, name: toolName, status });
+      toolCallTracker.set(toolId, { id: toolId, name: toolName, status, input });
     } else {
       const existing = toolCallTracker.get(toolId);
       if (existing) existing.status = status;
@@ -518,7 +518,7 @@ async function handleCommand(
     }
 
     case '/list': {
-      const sessions = ctx.store.listCliSessions({ limit: 20 });
+      const sessions = ctx.store.listCliSessions({ limit: 5 });
       if (sessions.length === 0) {
         response = 'No local CLI sessions found.';
         break;
@@ -554,7 +554,7 @@ async function handleCommand(
         if (cached && num <= cached.length) {
           target = cached[num - 1];
         } else {
-          const freshSessions = ctx.store.listCliSessions({ limit: 20 });
+          const freshSessions = ctx.store.listCliSessions({ limit: 5 });
           listCache.set(msg.chatId, { sessions: freshSessions, cachedAt: Date.now() });
           if (num <= freshSessions.length) {
             target = freshSessions[num - 1];
