@@ -278,11 +278,13 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   let firstTextSeen = false;
   let cycleHasText = false;
   let cardHasText = false; // tracks whether current active card has text from a previous cycle
+  let cycleEnded = false;  // set by onCycleComplete — signals next onPartialText is a new cycle
 
   const onPartialText = (fullText: string) => {
     if (fullText.trim()) {
-      // Card already has text from a previous cycle → finalize, start a new card
-      if (cardHasText) {
+      // Only finalize when starting a NEW cycle (after onCycleComplete), not during streaming
+      if (cycleEnded && cardHasText) {
+        // Previous cycle had text → finalize, start a new card
         ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
         toolCallTracker.clear();
         cardHasText = false;
@@ -295,6 +297,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
       firstTextSeen = true;
       cycleHasText = true;
       cardHasText = true;
+      cycleEnded = false;
     }
     currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
@@ -320,6 +323,7 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     // via the cardHasText check in onPartialText.
     toolCallTracker.clear();
     cycleHasText = false;
+    cycleEnded = true;
   };
 
   try {
