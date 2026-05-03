@@ -690,13 +690,8 @@ export class FeishuClient {
       }
     }
 
-    // Append elapsed time only if this cycle had content
     if (hadContent) {
       state.cycleCount++;
-      const elapsed = Date.now() - state.lastCycleStartAt;
-      state.accumulatedContent = state.accumulatedContent
-        ? `${state.accumulatedContent} (${formatElapsed(elapsed)})`
-        : `(${formatElapsed(elapsed)})`;
     }
 
     // Clear for next cycle
