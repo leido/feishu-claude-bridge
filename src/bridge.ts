@@ -277,16 +277,24 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   let currentCycleText = '';
   let firstTextSeen = false;
   let cycleHasText = false;
+  let cardHasText = false; // tracks whether current active card has text from a previous cycle
 
   const onPartialText = (fullText: string) => {
-    // First text arriving after initial tool calls → finalize the tools-only card, start fresh
-    if (!firstTextSeen && fullText.trim() && toolCallTracker.size > 0) {
-      ctx.feishu.finalizeCard(msg.chatId, 'completed', '', null).catch(() => {});
-      toolCallTracker.clear();
-    }
     if (fullText.trim()) {
+      // Card already has text from a previous cycle → finalize, start a new card
+      if (cardHasText) {
+        ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
+        toolCallTracker.clear();
+        cardHasText = false;
+        currentCycleText = '';
+      } else if (!firstTextSeen && toolCallTracker.size > 0) {
+        // First text ever arriving after tool calls → finalize the tools-only card
+        ctx.feishu.finalizeCard(msg.chatId, 'completed', '', null).catch(() => {});
+        toolCallTracker.clear();
+      }
       firstTextSeen = true;
       cycleHasText = true;
+      cardHasText = true;
     }
     currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
@@ -307,16 +315,10 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   };
 
   const onCycleComplete = () => {
-    // Only finalize if this cycle produced text — tool-only cycles keep the card active
-    // so the next cycle's text flows into the same card
-    if (cycleHasText) {
-      ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
-      currentCycleText = '';
-      toolCallTracker.clear();
-    } else {
-      // Tool-only cycle: just clear tools, keep the card active for next cycle
-      toolCallTracker.clear();
-    }
+    // Don't finalize here — let the next cycle decide whether to merge or split.
+    // Tool-only cycles merge into the current card; text-bearing cycles start a new card
+    // via the cardHasText check in onPartialText.
+    toolCallTracker.clear();
     cycleHasText = false;
   };
 
