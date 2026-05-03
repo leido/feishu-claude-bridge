@@ -107,6 +107,7 @@ export class FeishuClient {
   private cardCreatePromises = new Map<string, Promise<boolean>>();
   private permissionCardIds = new Map<string, {
     cardId: string;
+    messageId: string;
     sequence: number;
     pendingText: string;
     toolCalls: ToolCallInfo[];
@@ -453,6 +454,8 @@ export class FeishuClient {
     }
     const state = this.activeCards.get(chatId);
     if (!state) return;
+    // Preserve existing tool calls not in the incoming list (e.g., completed tools from previous cycles)
+    const existing = state.toolCalls.filter((tc) => !tools.some((t) => t.id === tc.id));
     // Preserve approved flag from existing tool calls
     const merged = tools.map((tc) => {
       const prev = state.toolCalls.find((p) => p.id === tc.id);
@@ -461,7 +464,7 @@ export class FeishuClient {
       }
       return tc;
     });
-    state.toolCalls = merged;
+    state.toolCalls = [...existing, ...merged];
     this.updateCardContent(chatId, state.pendingText || '');
   }
 
@@ -755,6 +758,7 @@ export class FeishuClient {
       // Track card for later resolution update
       this.permissionCardIds.set(permissionRequestId, {
         cardId: state.cardId,
+        messageId: state.messageId,
         sequence: state.sequence,
         pendingText: state.pendingText || '',
         toolCalls: [...state.toolCalls],
@@ -887,7 +891,7 @@ export class FeishuClient {
       // Re-add to activeCards so continuation text streams here instead of creating a new card
       this.activeCards.set(chatId, {
         cardId: tracked.cardId,
-        messageId: '', // already sent, not needed for streaming updates
+        messageId: tracked.messageId,
         sequence: tracked.sequence,
         startTime: Date.now(),
         toolCalls: updatedTools,

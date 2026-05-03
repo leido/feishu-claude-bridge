@@ -208,9 +208,18 @@ function buildPermButtons(
   if (Array.isArray(suggestions)) {
     for (let i = 0; i < suggestions.length; i++) {
       const sug = suggestions[i] as PermissionSuggestion;
-      const label = DESTINATION_LABELS[sug.destination ?? ''] ?? `Allow (${sug.destination ?? 'unknown'})`;
-      buttons.push({ label, type: 'primary', action: `sug:${i}` });
-      sugHints.push(`\`${i + 2}\` ${label}`);
+      if (sug._questionOption) {
+        // AskUserQuestion option — use the option's label as button text
+        const label = (sug.label as string) || '_(unnamed)_';
+        const desc = sug.description as string | undefined;
+        const hint = desc ? `${label} — ${desc}` : label;
+        buttons.push({ label, type: 'primary', action: `sug:${i}` });
+        sugHints.push(`\`${i + 2}\` ${hint}`);
+      } else {
+        const label = DESTINATION_LABELS[sug.destination ?? ''] ?? `Allow (${sug.destination ?? 'unknown'})`;
+        buttons.push({ label, type: 'primary', action: `sug:${i}` });
+        sugHints.push(`\`${i + 2}\` ${label}`);
+      }
     }
   }
 

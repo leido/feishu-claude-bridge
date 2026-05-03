@@ -95,10 +95,16 @@ export async function forwardPermissionRequest(
 
   console.log(`[permissions] Forwarding permission request: ${permissionRequestId} tool=${toolName}`);
 
+  // Convert AskUserQuestion options to pseudo-suggestions for button rendering
+  let effectiveSuggestions = suggestions;
+  if (toolName.toLowerCase() === 'askuserquestion' && (!suggestions || suggestions.length === 0)) {
+    effectiveSuggestions = extractQuestionOptions(toolInput);
+  }
+
   const mdText = formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
 
   // Send permission card with action buttons
-  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, suggestions);
+  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions);
 
   // Record the link
   if (result.ok && result.messageId) {
@@ -108,7 +114,7 @@ export async function forwardPermissionRequest(
         chatId,
         messageId: result.messageId,
         toolName,
-        suggestions: suggestions ? JSON.stringify(suggestions) : '',
+        suggestions: effectiveSuggestions ? JSON.stringify(effectiveSuggestions) : '',
       });
     } catch { /* best effort */ }
   }
@@ -175,17 +181,42 @@ export async function handlePermissionCallback(
 
   switch (action) {
     case 'allow':
-      resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow' });
       resolveAction = 'allow';
+      break;
+
+    case 'sug': {
+      resolveAction = 'allow';
+      break;
+    }
+
+    case 'deny':
+      break;
+
+    default:
+      return false;
+  }
+
+  // Update card FIRST (remove buttons, re-add to activeCards with approved flag)
+  // This must complete before unblocking the SDK so that tool events can find the card
+  await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
+
+  // NOW unblock the SDK — tool execution starts, events will find the card in activeCards
+  switch (action) {
+    case 'allow':
+      resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow' });
       break;
 
     case 'sug': {
       let updatedPermissions: PermissionUpdate[] | undefined;
       if (link.suggestions) {
         try {
-          const all = JSON.parse(link.suggestions) as PermissionUpdate[];
+          const all = JSON.parse(link.suggestions) as Array<Record<string, unknown>>;
           if (Array.isArray(all) && suggestionIndex < all.length) {
-            updatedPermissions = [all[suggestionIndex]];
+            const sug = all[suggestionIndex];
+            // Skip updatedPermissions for AskUserQuestion option clicks
+            if (!sug._questionOption) {
+              updatedPermissions = [sug as unknown as PermissionUpdate];
+            }
           }
         } catch { /* fall through */ }
       }
@@ -193,7 +224,6 @@ export async function handlePermissionCallback(
         behavior: 'allow',
         updatedPermissions,
       });
-      resolveAction = 'allow';
       break;
     }
 
@@ -208,10 +238,8 @@ export async function handlePermissionCallback(
       return false;
   }
 
-  // Update the permission card to show resolved status
   if (resolved) {
     console.log(`[permissions] Permission resolved: ${permissionRequestId}, action=${resolveAction}, chatId=${link.chatId}`);
-    await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
   }
 
   return resolved;
@@ -277,6 +305,24 @@ function formatPermissionMarkdown(toolName: string, input: Record<string, unknow
   return lines.join('\n');
 }
 
+/** Extract AskUserQuestion options as pseudo-suggestions for button rendering. */
+function extractQuestionOptions(input: Record<string, unknown>): unknown[] {
+  const questions = Array.isArray(input.questions) ? input.questions as Question[] : [];
+  const options: unknown[] = [];
+  for (const q of questions) {
+    if (Array.isArray(q.options)) {
+      for (const opt of q.options) {
+        options.push({
+          _questionOption: true as const,
+          label: opt.label ?? '',
+          description: opt.description,
+        });
+      }
+    }
+  }
+  return options;
+}
+
 function formatAskUserQuestion(input: Record<string, unknown>): string {
   const questions = Array.isArray(input.questions) ? input.questions as Question[] : [];
   const lines: string[] = ['**Permission Required — AskUserQuestion**', ''];
@@ -290,14 +336,7 @@ function formatAskUserQuestion(input: Record<string, unknown>): string {
 
       const header = q.header ? ` \`${escapeMd(q.header)}\`` : '';
       lines.push(`**Q${i + 1}: ${escapeMd(q.question ?? '')}**${header}`);
-
-      if (Array.isArray(q.options) && q.options.length > 0) {
-        for (const opt of q.options) {
-          const label = opt.label ? `**${escapeMd(opt.label)}**` : '_(unnamed)_';
-          const desc = opt.description ? ` — ${escapeMd(opt.description)}` : '';
-          lines.push(`  • ${label}${desc}`);
-        }
-      }
+      // Options are rendered as clickable buttons — no text bullets needed
 
       if (q.multiSelect) {
         lines.push('  _(multi-select)_');
