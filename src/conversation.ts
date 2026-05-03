@@ -25,7 +25,7 @@ import type {
 
 export type OnPermissionRequest = (perm: PermissionRequestInfo) => Promise<void>;
 export type OnPartialText = (fullText: string) => void;
-export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => void;
+export type OnToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>, error?: string) => void;
 export type OnCycleComplete = () => void;
 
 /**
@@ -218,9 +218,18 @@ async function consumeStream(
                 seenToolResultIds.add(resultData.tool_use_id);
                 contentBlocks.push(newBlock);
               }
+              if (resultData.is_error) {
+                const toolUseBlock = contentBlocks.find(
+                  (b) => b.type === 'tool_use' && 'id' in b && b.id === resultData.tool_use_id,
+                );
+                const toolName = (toolUseBlock && 'name' in toolUseBlock) ? toolUseBlock.name : 'unknown';
+                console.warn(`[conversation] tool error: ${toolName} (id=${resultData.tool_use_id})`);
+                console.warn(`[conversation] tool error detail: ${String(resultData.content || '').slice(0, 500)}`);
+              }
               if (onToolEvent) {
                 try {
-                  onToolEvent(resultData.tool_use_id, '', resultData.is_error ? 'error' : 'complete');
+                  const errContent = resultData.is_error ? String(resultData.content || '') : undefined;
+                  onToolEvent(resultData.tool_use_id, '', resultData.is_error ? 'error' : 'complete', undefined, errContent);
                 } catch { /* non-critical */ }
               }
               // Only trigger cycle complete when all pending tools have finished

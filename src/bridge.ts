@@ -199,42 +199,61 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
 
   if (!rawText && !hasAttachments) return;
 
-  // Numeric shortcut for permission replies (1=allow, 2..N=suggestions, last=deny)
+  // Numeric shortcut for permission replies
   const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (/^\d+$/.test(normalized)) {
+  if (/^\d+(\.\d+)?$/.test(normalized)) {
     const pendingLinks = ctx.store.listPendingPermissionLinksByChat(msg.chatId);
     if (pendingLinks.length === 1) {
       const link = pendingLinks[0];
-      const sugCount = link.suggestions ? (() => { try { return JSON.parse(link.suggestions).length; } catch { return 0; } })() : 0;
-      const totalButtons = 1 + sugCount + 1; // allow + suggestions + deny
-      const num = parseInt(normalized, 10);
+      const permId = link.permissionRequestId;
 
-      if (num < 1 || num > totalButtons) {
-        // Not a valid shortcut → fall through
-      } else {
-        let callbackData: string;
-        let label: string;
-        const permId = link.permissionRequestId;
-
-        if (num === 1) {
-          callbackData = `perm:allow:${permId}`;
-          label = 'Allow once';
-        } else if (num === totalButtons) {
-          callbackData = `perm:deny:${permId}`;
-          label = 'Deny';
-        } else {
-          const sugIdx = num - 2;
-          callbackData = `perm:sug:${sugIdx}:${permId}`;
-          label = `Suggestion ${sugIdx + 1}`;
+      // Multi-question mode: accept Q.O format (e.g. "1.2" = question 1, option 2)
+      if (link.questionMode === 'multi' && normalized.includes('.')) {
+        const match = normalized.match(/^(\d+)\.(\d+)$/);
+        if (match) {
+          const qIdx = parseInt(match[1]) - 1;
+          const oIdx = parseInt(match[2]) - 1;
+          const callbackData = `perm:ans:${qIdx}:${oIdx}:${permId}`;
+          const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
+          if (handled) {
+            await deliver(ctx, msg.chatId, `Q${qIdx + 1} option ${oIdx + 1}: recorded.`);
+          } else {
+            await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
+          }
+          return;
         }
+      }
 
-        const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
-        if (handled) {
-          await deliver(ctx, msg.chatId, `${label}: recorded.`);
-        } else {
-          await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
+      // Standard numeric shortcut: 1=allow, 2..N=suggestions, last=deny
+      if (/^\d+$/.test(normalized)) {
+        const sugCount = link.suggestions ? (() => { try { return JSON.parse(link.suggestions).length; } catch { return 0; } })() : 0;
+        const totalButtons = 1 + sugCount + 1; // allow + suggestions + deny
+        const num = parseInt(normalized, 10);
+
+        if (num >= 1 && num <= totalButtons) {
+          let callbackData: string;
+          let label: string;
+
+          if (num === 1) {
+            callbackData = `perm:allow:${permId}`;
+            label = 'Allow once';
+          } else if (num === totalButtons) {
+            callbackData = `perm:deny:${permId}`;
+            label = 'Deny';
+          } else {
+            const sugIdx = num - 2;
+            callbackData = `perm:sug:${sugIdx}:${permId}`;
+            label = `Suggestion ${sugIdx + 1}`;
+          }
+
+          const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
+          if (handled) {
+            await deliver(ctx, msg.chatId, `${label}: recorded.`);
+          } else {
+            await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
+          }
+          return;
         }
-        return;
       }
     }
     if (pendingLinks.length > 1) {
@@ -276,9 +295,9 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
-  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => {
+  const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>, error?: string) => {
     try {
-      ctx.feishu.onToolEvent(msg.chatId, toolId, toolName, status, input);
+      ctx.feishu.onToolEvent(msg.chatId, toolId, toolName, status, input, error);
     } catch { /* non-critical */ }
   };
 

@@ -355,6 +355,8 @@ export class JsonFileStore {
       toolName: link.toolName,
       resolved: false,
       suggestions: link.suggestions,
+      questionMode: link.questionMode,
+      toolInput: link.toolInput,
     };
     this.permissionLinks.set(link.permissionRequestId, record);
     this.persistPermissions();

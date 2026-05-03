@@ -14,6 +14,35 @@ import {
   buildPermissionButtonCard,
 } from './feishu-markdown.js';
 
+// ── Multi-question answer tracking ────────────────────────────
+
+/** In-memory tracking of answers for multi-question AskUserQuestion. */
+const multiQuestionAnswers = new Map<string, Map<number, number>>(); // permId → (qIdx → oIdx)
+
+export function classifyQuestionMode(input: Record<string, unknown>): 'none' | 'single' | 'multi' {
+  const questions = Array.isArray(input.questions) ? input.questions as Question[] : [];
+  if (questions.length === 0) return 'none';
+  if (questions.length === 1) return 'single';
+  return 'multi';
+}
+
+export function setMultiQuestionAnswer(permissionRequestId: string, questionIndex: number, optionIndex: number): void {
+  let answers = multiQuestionAnswers.get(permissionRequestId);
+  if (!answers) {
+    answers = new Map();
+    multiQuestionAnswers.set(permissionRequestId, answers);
+  }
+  answers.set(questionIndex, optionIndex);
+}
+
+export function getMultiQuestionAnswers(permissionRequestId: string): Map<number, number> | undefined {
+  return multiQuestionAnswers.get(permissionRequestId);
+}
+
+export function clearMultiQuestionAnswers(permissionRequestId: string): void {
+  multiQuestionAnswers.delete(permissionRequestId);
+}
+
 export class PendingPermissions {
   private pending = new Map<string, {
     resolve: (r: PermissionResult) => void;
@@ -31,7 +60,7 @@ export class PendingPermissions {
     });
   }
 
-  resolve(permissionRequestId: string, resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[] }): boolean {
+  resolve(permissionRequestId: string, resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[]; updatedInput?: Record<string, unknown> }): boolean {
     const entry = this.pending.get(permissionRequestId);
     if (!entry) return false;
     clearTimeout(entry.timer);
@@ -39,6 +68,7 @@ export class PendingPermissions {
       entry.resolve({
         behavior: 'allow',
         ...(resolution.updatedPermissions ? { updatedPermissions: resolution.updatedPermissions } : {}),
+        ...(resolution.updatedInput ? { updatedInput: resolution.updatedInput } : {}),
       });
     } else {
       entry.resolve({ behavior: 'deny', message: resolution.message || 'Denied by user' });
@@ -97,14 +127,28 @@ export async function forwardPermissionRequest(
 
   // Convert AskUserQuestion options to pseudo-suggestions for button rendering
   let effectiveSuggestions = suggestions;
+  let questionMode: 'none' | 'single' | 'multi' | undefined;
+  let toolInputJson: string | undefined;
+
   if (toolName.toLowerCase() === 'askuserquestion' && (!suggestions || suggestions.length === 0)) {
-    effectiveSuggestions = extractQuestionOptions(toolInput);
+    questionMode = classifyQuestionMode(toolInput);
+    if (questionMode === 'multi') {
+      // Multi-question: store toolInput for later answer resolution, no flat suggestions
+      toolInputJson = JSON.stringify(toolInput);
+      effectiveSuggestions = [];
+    } else {
+      effectiveSuggestions = extractQuestionOptions(toolInput);
+    }
   }
 
   const mdText = formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
 
+  // Build multi-question data if applicable
+  const questions = Array.isArray(toolInput.questions) ? toolInput.questions as Question[] : [];
+  const multiQuestionData = questionMode === 'multi' ? { questions } : undefined;
+
   // Send permission card with action buttons
-  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions);
+  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions, multiQuestionData);
 
   // Record the link
   if (result.ok && result.messageId) {
@@ -115,6 +159,8 @@ export async function forwardPermissionRequest(
         messageId: result.messageId,
         toolName,
         suggestions: effectiveSuggestions ? JSON.stringify(effectiveSuggestions) : '',
+        questionMode,
+        toolInput: toolInputJson,
       });
     } catch { /* best effort */ }
   }
@@ -134,15 +180,24 @@ export async function handlePermissionCallback(
   if (parts.length < 3 || parts[0] !== 'perm') return false;
 
   const action = parts[1];
-  // Parse permissionRequestId: for 'sug:N:id', id starts at parts[3]
+  // Parse permissionRequestId: for 'sug:N:id', 'ans:Q:O:id', id starts after action params
   let permissionRequestId: string;
   let suggestionIndex = -1;
+  let questionIndex = -1;
+  let optionIndex = -1;
 
   if (action === 'sug') {
     if (parts.length < 4) return false;
     suggestionIndex = parseInt(parts[2], 10);
     if (isNaN(suggestionIndex) || suggestionIndex < 0) return false;
     permissionRequestId = parts.slice(3).join(':');
+  } else if (action === 'ans') {
+    // perm:ans:{qIdx}:{oIdx}:{id}
+    if (parts.length < 5) return false;
+    questionIndex = parseInt(parts[2], 10);
+    optionIndex = parseInt(parts[3], 10);
+    if (isNaN(questionIndex) || isNaN(optionIndex) || questionIndex < 0 || optionIndex < 0) return false;
+    permissionRequestId = parts.slice(4).join(':');
   } else {
     permissionRequestId = parts.slice(2).join(':');
   }
@@ -169,6 +224,40 @@ export async function handlePermissionCallback(
   }
 
   let claimed: boolean;
+
+  // 'ans' action: intermediate step for multi-question — don't resolve yet
+  if (action === 'ans') {
+    setMultiQuestionAnswer(permissionRequestId, questionIndex, optionIndex);
+    const answers = getMultiQuestionAnswers(permissionRequestId)!;
+
+    // Parse questions to check if all answered
+    const questions: Question[] = link.toolInput ? (JSON.parse(link.toolInput).questions ?? []) : [];
+    const allAnswered = questions.length > 0 && questions.every((_, qi) => answers.has(qi));
+
+    // Update card with selected state
+    await ctx.feishu.updateMultiQuestionCard(permissionRequestId, questions, answers, link.chatId).catch(() => {});
+
+    if (allAnswered) {
+      // Auto-submit: build answers map and resolve
+      try { ctx.store.markPermissionLinkResolved(permissionRequestId); } catch { /* */ }
+      const answerMap: Record<string, string> = {};
+      for (let qi = 0; qi < questions.length; qi++) {
+        const q = questions[qi];
+        const oi = answers.get(qi)!;
+        const opt = q.options?.[oi];
+        answerMap[q.question ?? `Question ${qi + 1}`] = opt?.label ?? '';
+      }
+      const updatedInput = link.toolInput ? { ...JSON.parse(link.toolInput), answers: answerMap } : { answers: answerMap };
+      await ctx.feishu.resolvePermissionCard(permissionRequestId, 'allow', link.chatId).catch(() => {});
+      const resolved = ctx.permissions.resolve(permissionRequestId, { behavior: 'allow', updatedInput });
+      if (resolved) console.log(`[permissions] Multi-question auto-submitted: ${permissionRequestId}, answers=${JSON.stringify(answerMap)}`);
+      clearMultiQuestionAnswers(permissionRequestId);
+      return resolved;
+    }
+
+    return true; // Answer recorded, waiting for more
+  }
+
   try {
     claimed = ctx.store.markPermissionLinkResolved(permissionRequestId);
   } catch {
@@ -198,7 +287,8 @@ export async function handlePermissionCallback(
 
   // Update card FIRST (remove buttons, re-add to activeCards with approved flag)
   // This must complete before unblocking the SDK so that tool events can find the card
-  await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId).catch(() => {});
+  const shouldFinalize = resolveAction === 'allow' && link.toolName.toLowerCase() === 'exitplanmode';
+  await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId, { finalize: shouldFinalize }).catch(() => {});
 
   // NOW unblock the SDK — tool execution starts, events will find the card in activeCards
   switch (action) {
@@ -349,16 +439,21 @@ function formatAskUserQuestion(input: Record<string, unknown>): string {
 
 function formatExitPlanMode(input: Record<string, unknown>): string {
   const prompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts as AllowedPrompt[] : [];
-  const lines: string[] = ['**Permission Required — Exit Plan Mode**', ''];
+  const lines: string[] = ['**Plan Review — Approve to Start Implementation**', ''];
 
   if (prompts.length === 0) {
-    lines.push('_No specific permissions requested — approves the plan_');
+    lines.push('_No specific tools requested_');
   } else {
-    lines.push('Allowed tools:');
     for (const p of prompts) {
-      const tool = p.tool ? `\`${escapeMd(p.tool)}\`` : '_(unknown)_';
-      const desc = p.prompt ? ` — ${escapeMd(p.prompt)}` : '';
-      lines.push(`  • ${tool}${desc}`);
+      const tool = p.tool ? `\`${escapeMd(p.tool)}\`` : '';
+      const desc = p.prompt ? escapeMd(p.prompt) : '';
+      if (tool && desc) {
+        lines.push(`• ${tool} — ${desc}`);
+      } else if (tool) {
+        lines.push(`• ${tool}`);
+      } else if (desc) {
+        lines.push(`• ${desc}`);
+      }
     }
   }
 

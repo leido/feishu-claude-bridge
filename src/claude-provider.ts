@@ -335,7 +335,7 @@ export class ClaudeProvider {
                 if (result.behavior === 'allow') {
                   return {
                     behavior: 'allow' as const,
-                    updatedInput: input,
+                    updatedInput: result.updatedInput || input,
                     ...(result.updatedPermissions ? { updatedPermissions: result.updatedPermissions as PermissionUpdate[] } : {}),
                   };
                 }

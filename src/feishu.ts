@@ -30,6 +30,8 @@ import {
   buildPermissionButtonCard,
   buildStreamingPermissionCard,
   buildPermResolvedStreamingCard,
+  buildMultiQuestionCard,
+  buildMultiQuestionStreamingCard,
   buildToolProgressMarkdown,
   formatElapsed,
   formatTokenCount,
@@ -118,6 +120,7 @@ export class FeishuClient {
     toolCalls: ToolCallInfo[];
     accumulatedContent: string;
     cycleCount: number;
+    lastCycleStartAt: number;
   }>();
   private resolvedPermissionChats = new Set<string>();
 
@@ -506,22 +509,26 @@ export class FeishuClient {
       if (prev?.approved) {
         return { ...tc, approved: true };
       }
+      if (prev?.error && !tc.error) {
+        return { ...tc, error: prev.error };
+      }
       return tc;
     });
     state.toolCalls = [...existing, ...merged];
     this.updateCardContent(chatId, state.pendingText || '');
   }
 
-  onToolEvent(chatId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>): void {
+  onToolEvent(chatId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>, error?: string): void {
     const tools: ToolCallInfo[] = [];
     if (toolName) {
-      tools.push({ id: toolId, name: toolName, status, input });
+      tools.push({ id: toolId, name: toolName, status, input, error });
     } else {
       // Status-only update — get existing tool name
       const state = this.activeCards.get(chatId);
       const existing = state?.toolCalls.find((tc) => tc.id === toolId);
       if (existing) {
         existing.status = status;
+        if (error) existing.error = error;
         this.updateCardContent(chatId, state?.pendingText || '');
         return;
       }
@@ -881,6 +888,7 @@ export class FeishuClient {
     permMdText: string,
     permissionRequestId: string,
     suggestions?: unknown[],
+    multiQuestionData?: { questions: Array<{ question?: string; header?: string; options?: Array<{ label?: string; description?: string }>; multiSelect?: boolean }> },
   ): Promise<SendResult | null> {
     // Wait for any in-flight card creation before checking activeCards
     const pending = this.cardCreatePromises.get(chatId);
@@ -914,16 +922,30 @@ export class FeishuClient {
         },
       });
 
-      // Replace card with accumulated + response text + tool progress + permission buttons
-      const cardJson = buildStreamingPermissionCard(
-        state.accumulatedContent,
-        state.pendingText || '',
-        state.toolCalls,
-        permMdText,
-        permissionRequestId,
-        chatId,
-        suggestions,
-      );
+      // Build card: use multi-question layout if applicable
+      let cardJson: string;
+      if (multiQuestionData && multiQuestionData.questions.length > 1) {
+        cardJson = buildMultiQuestionStreamingCard(
+          state.accumulatedContent,
+          state.pendingText || '',
+          state.toolCalls,
+          permMdText,
+          permissionRequestId,
+          chatId,
+          multiQuestionData.questions,
+          new Map(),
+        );
+      } else {
+        cardJson = buildStreamingPermissionCard(
+          state.accumulatedContent,
+          state.pendingText || '',
+          state.toolCalls,
+          permMdText,
+          permissionRequestId,
+          chatId,
+          suggestions,
+        );
+      }
       state.sequence++;
       await (this.restClient as any).cardkit.v1.card.update({
         path: { card_id: state.cardId },
@@ -943,6 +965,7 @@ export class FeishuClient {
         toolCalls: [...state.toolCalls],
         accumulatedContent: state.accumulatedContent,
         cycleCount: state.cycleCount,
+        lastCycleStartAt: state.lastCycleStartAt,
       });
       return { ok: true, messageId: state.messageId };
     } catch (err) {
@@ -957,26 +980,32 @@ export class FeishuClient {
     permissionRequestId: string,
     replyToMessageId?: string,
     suggestions?: unknown[],
+    multiQuestionData?: { questions: Array<{ question?: string; header?: string; options?: Array<{ label?: string; description?: string }>; multiSelect?: boolean }> },
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
     // Try to embed permission into the active streaming card first
-    let embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
+    let embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions, multiQuestionData);
     if (!embedded) {
       // No active card — create one and retry embedding
       const msgId = replyToMessageId || this.lastIncomingMessageId.get(chatId);
       console.log(`[feishu] sendPermCard: embed failed, creating new card (msgId=${!!msgId})`);
       if (msgId) {
         await this.createStreamingCard(chatId, msgId);
-        embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions);
+        embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions, multiQuestionData);
       }
     }
     if (embedded) return embedded;
 
     // Fallback: send as a separate card
-    const cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, suggestions);
+    let cardJson: string;
+    if (multiQuestionData && multiQuestionData.questions.length > 1) {
+      cardJson = buildMultiQuestionCard(mdText, permissionRequestId, chatId, multiQuestionData.questions, new Map());
+    } else {
+      cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, suggestions);
+    }
 
     try {
       let res;
@@ -1025,11 +1054,16 @@ export class FeishuClient {
    * Update a permission card to show resolved status (Allowed/Denied).
    * Re-enables streaming and re-adds to activeCards so continuation text
    * flows into the same card instead of creating a duplicate.
+   *
+   * When `finalize` is true, the card is finalized (streaming disabled, footer
+   * added) and NOT re-added to activeCards. This is used for ExitPlanMode so
+   * subsequent execution text starts in a fresh card.
    */
   async resolvePermissionCard(
     permissionRequestId: string,
     action: 'allow' | 'deny',
     chatId: string,
+    options?: { finalize?: boolean },
   ): Promise<boolean> {
     const tracked = this.permissionCardIds.get(permissionRequestId);
     if (!tracked || !this.restClient) {
@@ -1037,21 +1071,52 @@ export class FeishuClient {
       return false;
     }
     this.permissionCardIds.delete(permissionRequestId);
-    console.log(`[feishu] resolvePermCard: updating card ${tracked.cardId}, action=${action}, textLen=${tracked.pendingText.length}, tools=${tracked.toolCalls.length}`);
+    console.log(`[feishu] resolvePermCard: updating card ${tracked.cardId}, action=${action}, finalize=${!!options?.finalize}, textLen=${tracked.pendingText.length}, tools=${tracked.toolCalls.length}`);
 
     try {
       // Update tool call status: matching tool → ✅/❌, others keep their state
       const updatedTools = tracked.toolCalls.map((tc) => {
         if (tc.id === permissionRequestId) {
           if (action === 'allow') {
-            return { ...tc, status: 'running' as const, approved: true };
+            return { ...tc, status: 'complete' as const, approved: true };
           }
           return { ...tc, status: 'error' as const, denied: true };
         }
         return tc;
       });
 
-      // Build card with resolved status but keep streaming_mode enabled
+      if (options?.finalize && action === 'allow') {
+        // Finalize mode: disable streaming, show final card with footer, don't re-add to activeCards
+        tracked.sequence++;
+        await (this.restClient as any).cardkit.v1.card.settings({
+          path: { card_id: tracked.cardId },
+          data: {
+            settings: JSON.stringify({ config: { streaming_mode: false } }),
+            sequence: tracked.sequence,
+          },
+        });
+
+        const elapsedMs = Date.now() - tracked.lastCycleStartAt;
+        const finalCardJson = buildFinalCardJson(
+          tracked.accumulatedContent,
+          tracked.pendingText,
+          updatedTools,
+          { status: '✅ Plan Approved', elapsed: formatElapsed(elapsedMs) },
+        );
+        tracked.sequence++;
+        await (this.restClient as any).cardkit.v1.card.update({
+          path: { card_id: tracked.cardId },
+          data: {
+            card: { type: 'card_json', data: finalCardJson },
+            sequence: tracked.sequence,
+          },
+        });
+
+        console.log(`[feishu] Permission card finalized (no reactivate): cardId=${tracked.cardId}, action=${action}`);
+        return true;
+      }
+
+      // Normal mode: build card with resolved status but keep streaming_mode enabled
       // so continuation text updates this same card
       const cardJson = buildPermResolvedStreamingCard(
         tracked.accumulatedContent,
@@ -1081,7 +1146,7 @@ export class FeishuClient {
         pendingText: tracked.pendingText || null,
         accumulatedContent: tracked.accumulatedContent,
         cycleCount: tracked.cycleCount,
-        lastCycleStartAt: Date.now(),
+        lastCycleStartAt: tracked.lastCycleStartAt,
         lastUpdateAt: Date.now(),
         throttleTimer: null,
       });
@@ -1090,6 +1155,39 @@ export class FeishuClient {
       return true;
     } catch (err) {
       console.warn('[feishu] Failed to update permission card resolved state:', err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
+  /** Update a multi-question permission card with current answer state. */
+  async updateMultiQuestionCard(
+    permissionRequestId: string,
+    questions: Array<{ question?: string; header?: string; options?: Array<{ label?: string; description?: string }>; multiSelect?: boolean }>,
+    answers: Map<number, number>,
+    chatId: string,
+  ): Promise<boolean> {
+    const tracked = this.permissionCardIds.get(permissionRequestId);
+    if (!tracked || !this.restClient) return false;
+
+    try {
+      const cardJson = buildMultiQuestionStreamingCard(
+        tracked.accumulatedContent,
+        tracked.pendingText,
+        tracked.toolCalls,
+        '',
+        permissionRequestId,
+        chatId,
+        questions,
+        answers,
+      );
+      tracked.sequence++;
+      await (this.restClient as any).cardkit.v1.card.update({
+        path: { card_id: tracked.cardId },
+        data: { card: { type: 'card_json', data: cardJson }, sequence: tracked.sequence },
+      });
+      return true;
+    } catch (err) {
+      console.warn('[feishu] Failed to update multi-question card:', err instanceof Error ? err.message : err);
       return false;
     }
   }

@@ -64,6 +64,10 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'error' ? '❌' : '✅';
     const detail = formatToolDetail(tc.name, tc.input);
     const base = detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
+    if (tc.status === 'error' && tc.error) {
+      const errPreview = tc.error.length > 200 ? tc.error.slice(0, 200) + '...' : tc.error;
+      return `${base}\n> ${errPreview}`;
+    }
     if (tc.approved) return `${base}\n[approved]`;
     if ((tc as any).denied) return `${base}\n[denied]`;
     return base;
@@ -253,6 +257,156 @@ function buildPermButtons(
 
   const hints = `Or reply: ${sugHints.join(' · ')}`;
   return { elements: buttonElements, hints };
+}
+
+// ── Multi-question AskUserQuestion card rendering ──────────────
+
+interface QuestionOption {
+  label?: string;
+  description?: string;
+  preview?: string;
+}
+
+interface Question {
+  question?: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiSelect?: boolean;
+}
+
+function buildMultiQuestionPermButtons(
+  permissionRequestId: string,
+  chatId: string,
+  questions: Question[],
+  answers: Map<number, number>,
+): { elements: Array<Record<string, unknown>>; hints: string } {
+  const elements: Array<Record<string, unknown>> = [];
+  const hintParts: string[] = [];
+
+  for (let qi = 0; qi < questions.length; qi++) {
+    const q = questions[qi];
+    const header = q.header ? ` \`${q.header}\`` : '';
+    const qText = q.question ?? `Question ${qi + 1}`;
+    const selectedOi = answers.get(qi);
+
+    // Question header
+    elements.push({
+      tag: 'markdown',
+      content: `**Q${qi + 1}: ${qText}**${header}`,
+      text_size: 'normal',
+    });
+
+    // Option buttons for this question
+    const optBtns: Array<Record<string, unknown>> = [];
+    if (q.options) {
+      for (let oi = 0; oi < q.options.length; oi++) {
+        const opt = q.options[oi];
+        const isSelected = selectedOi === oi;
+        const label = isSelected ? `✅ ${opt.label ?? '_(unnamed)_'}` : (opt.label ?? '_(unnamed)_');
+        optBtns.push({
+          tag: 'button',
+          type: isSelected ? 'primary_filled' : 'primary',
+          size: 'medium',
+          width: 'fill',
+          text: { tag: 'plain_text', content: label },
+          behaviors: [{ type: 'callback', value: { callback_data: `perm:ans:${qi}:${oi}:${permissionRequestId}`, chatId } }],
+        });
+        hintParts.push(`\`${qi + 1}.${oi + 1}\` ${opt.label ?? '_(unnamed)_'}`);
+      }
+    }
+
+    elements.push({ tag: 'column_set', columns: optBtns.map((btn) => ({ tag: 'column', width: 'auto', elements: [btn] })) });
+  }
+
+  // Deny button
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'button',
+    type: 'danger',
+    size: 'medium',
+    width: 'fill',
+    text: { tag: 'plain_text', content: 'Deny' },
+    behaviors: [{ type: 'callback', value: { callback_data: `perm:deny:${permissionRequestId}`, chatId } }],
+  });
+
+  const hints = hintParts.length > 0 ? `Or reply: ${hintParts.join(' · ')}` : '';
+  return { elements, hints };
+}
+
+export function buildMultiQuestionCard(
+  text: string,
+  permissionRequestId: string,
+  chatId: string,
+  questions: Question[],
+  answers: Map<number, number>,
+): string {
+  const { elements: questionElements, hints } = buildMultiQuestionPermButtons(permissionRequestId, chatId, questions, answers);
+
+  const bodyElements: Array<Record<string, unknown>> = [
+    { tag: 'markdown', content: text, text_size: 'normal' },
+    { tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' },
+    { tag: 'hr' },
+    ...questionElements,
+  ];
+  if (hints) bodyElements.push({ tag: 'markdown', content: hints, text_size: 'notation' });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'Permission Required' },
+      template: 'blue',
+      icon: { tag: 'standard_icon', token: 'lock-chat_filled' },
+      padding: '12px 12px 12px 12px',
+    },
+    body: { elements: bodyElements },
+  });
+}
+
+export function buildMultiQuestionStreamingCard(
+  accumulated: string,
+  responseText: string,
+  tools: ToolCallInfo[],
+  permText: string,
+  permissionRequestId: string,
+  chatId: string,
+  questions: Question[],
+  answers: Map<number, number>,
+): string {
+  const elements: Array<Record<string, unknown>> = [];
+
+  // Accumulated + current response text + tool progress
+  const parts: string[] = [];
+  if (accumulated) parts.push(accumulated);
+  if (responseText && responseText.trim()) parts.push(preprocessFeishuMarkdown(responseText));
+  const toolMd = buildToolProgressMarkdown(tools);
+  if (toolMd) parts.push(toolMd);
+  const content = parts.join('\n\n');
+  if (content) {
+    elements.push({ tag: 'markdown', content, text_align: 'left', text_size: 'normal' });
+  }
+
+  // Permission section with multi-question buttons
+  elements.push({ tag: 'hr' });
+  if (permText) {
+    elements.push({ tag: 'markdown', content: permText, text_size: 'normal' });
+  }
+  elements.push({ tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' });
+
+  const { elements: questionElements, hints } = buildMultiQuestionPermButtons(permissionRequestId, chatId, questions, answers);
+  elements.push(...questionElements);
+  if (hints) elements.push({ tag: 'markdown', content: hints, text_size: 'notation' });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true, streaming_mode: true },
+    body: {
+      elements: [
+        ...elements,
+        { tag: 'streaming_content', element_id: 'streaming_content' },
+      ],
+    },
+  });
 }
 
 export function buildPermissionButtonCard(

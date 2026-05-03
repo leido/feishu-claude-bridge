@@ -154,6 +154,8 @@ export interface ToolCallInfo {
   /** True if this tool call required user permission approval */
   approved?: boolean;
   input?: Record<string, unknown>;
+  /** Error message when status is 'error' */
+  error?: string;
 }
 
 // ── Permission ───────────────────────────────────────────────
@@ -173,6 +175,7 @@ export interface PermissionResult {
   behavior: 'allow' | 'deny';
   message?: string;
   updatedPermissions?: unknown[];
+  updatedInput?: Record<string, unknown>;
 }
 
 // ── Permission Link ──────────────────────────────────────────
@@ -184,6 +187,8 @@ export interface PermissionLinkInput {
   messageId: string;
   toolName: string;
   suggestions: string;
+  questionMode?: 'none' | 'single' | 'multi';
+  toolInput?: string;
 }
 
 /** Stored permission link record. */
@@ -194,6 +199,8 @@ export interface PermissionLinkRecord {
   toolName: string;
   resolved: boolean;
   suggestions: string;
+  questionMode?: 'none' | 'single' | 'multi';
+  toolInput?: string;
 }
 
 // ── Audit ───────────────────────────────────────────────────
