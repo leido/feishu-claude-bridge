@@ -32,6 +32,8 @@ import {
   buildPermResolvedStreamingCard,
   buildMultiQuestionCard,
   buildMultiQuestionStreamingCard,
+  buildPlanApprovalCard,
+  buildPlanApprovalResolvedCard,
   buildToolProgressMarkdown,
   formatElapsed,
   formatTokenCount,
@@ -974,6 +976,89 @@ export class FeishuClient {
     }
   }
 
+  /**
+   * Send a dedicated plan approval card for ExitPlanMode.
+   * Finalizes the current streaming card (without plan text), then creates
+   * a new card with the plan content and approval buttons.
+   */
+  private async sendPlanApprovalCard(
+    chatId: string,
+    permMdText: string,
+    permissionRequestId: string,
+    replyToMessageId?: string,
+    suggestions?: unknown[],
+    toolInput?: Record<string, unknown>,
+  ): Promise<SendResult> {
+    // Extract plan text from ExitPlanMode input
+    const planText = toolInput?.plan ? String(toolInput.plan) : '';
+    const state = this.activeCards.get(chatId);
+    if (state) {
+      // Remove ExitPlanMode from tool calls before finalizing (it's shown in the new approval card)
+      state.toolCalls = state.toolCalls.filter((tc) => tc.name.toLowerCase() !== 'exitplanmode');
+      // Finalize current card WITHOUT plan text (just tool progress + footer)
+      await this.finalizeCard(chatId, 'completed', '', null).catch((err: unknown) => {
+        console.warn('[feishu] Plan card finalize failed:', err instanceof Error ? err.message : err);
+      });
+    }
+
+    // Build and send dedicated plan approval card
+    const cardJson = buildPlanApprovalCard(planText, permMdText, permissionRequestId, chatId, suggestions);
+
+    try {
+      let res;
+      if (replyToMessageId) {
+        res = await (this.restClient as any).im.message.reply({
+          path: { message_id: replyToMessageId },
+          data: { content: cardJson, msg_type: 'interactive' },
+        });
+      } else {
+        res = await (this.restClient as any).im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: cardJson },
+        });
+      }
+
+      if (res?.data?.message_id) {
+        const messageId = res.data.message_id;
+        // Extract card_id from interactive message for tracking
+        let cardId = '';
+        try {
+          const msgData = typeof res.data?.content === 'string' ? JSON.parse(res.data.content) : res.data;
+          cardId = msgData?.card_id ?? res.data?.card_id ?? '';
+        } catch { /* no card_id */ }
+
+        if (!cardId) {
+          // Try to find card_id via message resource
+          try {
+            const msgRes = await (this.restClient as any).im.message.get({ path: { message_id: messageId } });
+            cardId = msgRes?.data?.items?.[0]?.card_id ?? '';
+          } catch { /* no card_id */ }
+        }
+
+        console.log(`[feishu] Plan approval card sent: cardId=${cardId}, planTextLen=${planText.length}`);
+
+        // Track for later resolution
+        this.permissionCardIds.set(permissionRequestId, {
+          cardId: cardId || messageId,
+          messageId,
+          sequence: 0,
+          pendingText: planText,
+          toolCalls: [],
+          accumulatedContent: '',
+          cycleCount: 0,
+          lastCycleStartAt: Date.now(),
+        });
+
+        return { ok: true, messageId };
+      }
+      console.warn('[feishu] Plan approval card send failed:', res?.msg);
+    } catch (err) {
+      console.warn('[feishu] Plan approval card error:', err instanceof Error ? err.message : err);
+    }
+
+    return { ok: false, error: 'Failed to send plan approval card' };
+  }
+
   async sendPermissionCard(
     chatId: string,
     mdText: string,
@@ -981,12 +1066,19 @@ export class FeishuClient {
     replyToMessageId?: string,
     suggestions?: unknown[],
     multiQuestionData?: { questions: Array<{ question?: string; header?: string; options?: Array<{ label?: string; description?: string }>; multiSelect?: boolean }> },
+    toolName?: string,
+    toolInput?: Record<string, unknown>,
   ): Promise<SendResult> {
     if (!this.restClient) {
       return { ok: false, error: 'Feishu client not initialized' };
     }
 
-    // Try to embed permission into the active streaming card first
+    // ExitPlanMode: dedicated plan approval card
+    if (toolName?.toLowerCase() === 'exitplanmode') {
+      return this.sendPlanApprovalCard(chatId, mdText, permissionRequestId, replyToMessageId, suggestions, toolInput);
+    }
+
+    // Default: try to embed permission into the active streaming card first
     let embedded = await this.embedPermissionInActiveCard(chatId, mdText, permissionRequestId, suggestions, multiQuestionData);
     if (!embedded) {
       // No active card — create one and retry embedding
@@ -1085,34 +1177,32 @@ export class FeishuClient {
         return tc;
       });
 
-      if (options?.finalize && action === 'allow') {
-        // Finalize mode: disable streaming, show final card with footer, don't re-add to activeCards
+      if (options?.finalize) {
+        // Plan approval card resolve: update with approved/denied status
+        const planText = tracked.pendingText || '';
+        const resolvedCardJson = buildPlanApprovalResolvedCard(planText, action);
         tracked.sequence++;
-        await (this.restClient as any).cardkit.v1.card.settings({
-          path: { card_id: tracked.cardId },
-          data: {
-            settings: JSON.stringify({ config: { streaming_mode: false } }),
-            sequence: tracked.sequence,
-          },
-        });
+        try {
+          await (this.restClient as any).cardkit.v1.card.update({
+            path: { card_id: tracked.cardId },
+            data: {
+              card: { type: 'card_json', data: resolvedCardJson },
+              sequence: tracked.sequence,
+            },
+          });
+        } catch {
+          // CardKit update may fail if cardId is a messageId; try message update instead
+          try {
+            await (this.restClient as any).im.message.patch({
+              path: { message_id: tracked.messageId },
+              data: { content: resolvedCardJson },
+            });
+          } catch (err2) {
+            console.warn('[feishu] Plan card resolve update failed:', err2 instanceof Error ? err2.message : err2);
+          }
+        }
 
-        const elapsedMs = Date.now() - tracked.lastCycleStartAt;
-        const finalCardJson = buildFinalCardJson(
-          tracked.accumulatedContent,
-          tracked.pendingText,
-          updatedTools,
-          { status: '✅ Plan Approved', elapsed: formatElapsed(elapsedMs) },
-        );
-        tracked.sequence++;
-        await (this.restClient as any).cardkit.v1.card.update({
-          path: { card_id: tracked.cardId },
-          data: {
-            card: { type: 'card_json', data: finalCardJson },
-            sequence: tracked.sequence,
-          },
-        });
-
-        console.log(`[feishu] Permission card finalized (no reactivate): cardId=${tracked.cardId}, action=${action}`);
+        console.log(`[feishu] Plan approval card resolved: cardId=${tracked.cardId}, action=${action}`);
         return true;
       }
 

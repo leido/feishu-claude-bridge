@@ -141,14 +141,15 @@ export async function forwardPermissionRequest(
     }
   }
 
-  const mdText = formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
+  // ExitPlanMode: plan text is shown in the approval card body, skip perm markdown
+  const mdText = toolName.toLowerCase() === 'exitplanmode' ? '' : formatPermissionMarkdown(toolName, toolInput, title, description, decisionReason);
 
   // Build multi-question data if applicable
   const questions = Array.isArray(toolInput.questions) ? toolInput.questions as Question[] : [];
   const multiQuestionData = questionMode === 'multi' ? { questions } : undefined;
 
   // Send permission card with action buttons
-  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions, multiQuestionData);
+  const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions, multiQuestionData, toolName, toolInput);
 
   // Record the link
   if (result.ok && result.messageId) {

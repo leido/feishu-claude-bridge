@@ -62,12 +62,26 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'error' ? '❌' : '✅';
+
+    // TodoWrite — render as task list
+    const n = tc.name.toLowerCase().replace(/_/g, '');
+    if ((n === 'todowrite' || n === 'todoread') && tc.input && Array.isArray(tc.input.todos)) {
+      const todos = tc.input.todos as Array<{ content: string; status: string; activeForm?: string }>;
+      const taskLines = todos.slice(0, 8).map((t) => {
+        const s = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜';
+        const text = t.content.length > 50 ? t.content.slice(0, 50) + '...' : t.content;
+        return `${s} ${text}`;
+      });
+      const suffix = todos.length > 8 ? `\n  ... +${todos.length - 8} more` : '';
+      return `${icon} \`${tc.name}\` (${todos.length})\n  ${taskLines.join('\n  ')}${suffix}`;
+    }
+
     const detail = formatToolDetail(tc.name, tc.input);
     const base = detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
     if (tc.status === 'error' && tc.error) {
       const oneLine = tc.error.replace(/\n+/g, ' ').trim();
       const errPreview = oneLine.length > 200 ? oneLine.slice(0, 200) + '...' : oneLine;
-      return `${base}\n> ${errPreview}`;
+      return `${base}\n  ⚠️ ${errPreview}`;
     }
     if (tc.approved) return `${base}\n[approved]`;
     if ((tc as any).denied) return `${base}\n[denied]`;
@@ -105,8 +119,8 @@ export function formatToolDetail(name: string, input?: Record<string, unknown>):
     return `\`${preview}\``;
   }
 
-  // Agent
-  if (n === 'agent' || n === 'todo_write' || n === 'todo_read') {
+  // Agent / TodoWrite / ExitPlanMode — suppress detail (shown elsewhere)
+  if (n === 'agent' || n === 'todo_write' || n === 'todo_read' || n === 'todowrite' || n === 'todoread' || n === 'exitplanmode') {
     return '';
   }
 
@@ -536,5 +550,93 @@ export function buildPermResolvedStreamingCard(
         element_id: 'streaming_content',
       }],
     },
+  });
+}
+
+/**
+ * Build a dedicated plan approval card for ExitPlanMode.
+ * Shows the plan text with a header and approval buttons.
+ */
+export function buildPlanApprovalCard(
+  planText: string,
+  permText: string,
+  permissionRequestId: string,
+  chatId?: string,
+  suggestions?: unknown[],
+): string {
+  const elements: Array<Record<string, unknown>> = [];
+
+  // Plan content
+  if (planText) {
+    elements.push({
+      tag: 'markdown',
+      content: preprocessFeishuMarkdown(planText),
+      text_align: 'left',
+      text_size: 'normal',
+    });
+  }
+
+  // Permission section
+  elements.push({ tag: 'hr' });
+  if (permText) {
+    elements.push({ tag: 'markdown', content: permText, text_size: 'normal' });
+  }
+  elements.push({ tag: 'markdown', content: '⏱ Expires in 5 minutes', text_size: 'notation' });
+
+  // Buttons
+  const { elements: buttonElements, hints } = buildPermButtons(permissionRequestId, chatId, suggestions);
+  elements.push({ tag: 'hr' });
+  elements.push(...buttonElements);
+  elements.push({ tag: 'markdown', content: hints, text_size: 'notation' });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '📋 Plan Approval' },
+      template: 'blue',
+      icon: { tag: 'standard_icon', token: 'approve_filled' },
+      padding: '12px 12px 12px 12px',
+    },
+    body: { elements },
+  });
+}
+
+/**
+ * Build the resolved plan approval card (after user clicks Allow/Deny).
+ */
+export function buildPlanApprovalResolvedCard(
+  planText: string,
+  action: 'allow' | 'deny',
+): string {
+  const statusIcon = action === 'deny' ? '❌ Plan Denied' : '✅ Plan Approved';
+  const elements: Array<Record<string, unknown>> = [];
+
+  if (planText) {
+    elements.push({
+      tag: 'markdown',
+      content: preprocessFeishuMarkdown(planText),
+      text_align: 'left',
+      text_size: 'normal',
+    });
+  }
+
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content: statusIcon,
+    text_size: 'normal',
+  });
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: '📋 Plan Approval' },
+      template: action === 'deny' ? 'red' : 'green',
+      icon: { tag: 'standard_icon', token: action === 'deny' ? 'reject_filled' : 'approve_filled' },
+      padding: '12px 12px 12px 12px',
+    },
+    body: { elements },
   });
 }
