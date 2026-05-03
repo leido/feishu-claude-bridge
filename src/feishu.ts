@@ -30,8 +30,10 @@ import {
   buildPermissionButtonCard,
   buildStreamingPermissionCard,
   buildPermResolvedStreamingCard,
+  buildToolProgressMarkdown,
   formatElapsed,
   formatTokenCount,
+  CARD_CONTENT_LIMIT,
 } from './feishu-markdown.js';
 
 const DEDUP_MAX = 1000;
@@ -48,6 +50,9 @@ interface CardState {
   toolCalls: ToolCallInfo[];
   thinking: boolean;
   pendingText: string | null;
+  accumulatedContent: string;
+  cycleCount: number;
+  lastCycleStartAt: number;
   lastUpdateAt: number;
   throttleTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -111,6 +116,8 @@ export class FeishuClient {
     sequence: number;
     pendingText: string;
     toolCalls: ToolCallInfo[];
+    accumulatedContent: string;
+    cycleCount: number;
   }>();
   private resolvedPermissionChats = new Set<string>();
 
@@ -188,6 +195,38 @@ export class FeishuClient {
     if (!this.running) return;
     this.running = false;
 
+    // Finalize all active streaming cards before clearing restClient
+    const finalizePromises: Promise<void>[] = [];
+    for (const [chatId, state] of this.activeCards) {
+      if (state.throttleTimer) clearTimeout(state.throttleTimer);
+      try {
+        const restClient = this.restClient;
+        if (restClient) {
+          state.sequence++;
+          const seq1 = state.sequence;
+          const cardId = state.cardId;
+          const finalCardJson = buildFinalCardJson(state.accumulatedContent, state.pendingText || '', state.toolCalls, {
+            status: '⚠️ Interrupted (restarting)',
+            elapsed: formatElapsed(Date.now() - state.startTime),
+          });
+          finalizePromises.push(
+            (restClient as any).cardkit.v1.card.settings({
+              path: { card_id: cardId },
+              data: { settings: JSON.stringify({ config: { streaming_mode: false } }), sequence: seq1 },
+            }).then(() => {
+              state.sequence++;
+              return (restClient as any).cardkit.v1.card.update({
+                path: { card_id: cardId },
+                data: { card: { type: 'card_json', data: finalCardJson }, sequence: state.sequence },
+              });
+            }).catch(() => {})
+          );
+        }
+      } catch { /* best effort */ }
+    }
+    await Promise.all(finalizePromises);
+    this.activeCards.clear();
+
     if (this.wsClient) {
       try { this.wsClient.close({ force: true }); } catch { /* ignore */ }
       this.wsClient = null;
@@ -198,11 +237,6 @@ export class FeishuClient {
       waiter(null);
     }
     this.waiters = [];
-
-    for (const [, state] of this.activeCards) {
-      if (state.throttleTimer) clearTimeout(state.throttleTimer);
-    }
-    this.activeCards.clear();
     this.cardCreatePromises.clear();
     this.permissionCardIds.clear();
     this.resolvedPermissionChats.clear();
@@ -380,6 +414,9 @@ export class FeishuClient {
         toolCalls: [],
         thinking: true,
         pendingText: null,
+        accumulatedContent: '',
+        cycleCount: 0,
+        lastCycleStartAt: Date.now(),
         lastUpdateAt: 0,
         throttleTimer: null,
       });
@@ -423,7 +460,14 @@ export class FeishuClient {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
 
-    const content = buildStreamingContent(state.pendingText || '', state.toolCalls);
+    const content = buildStreamingContent(state.accumulatedContent, state.pendingText || '', state.toolCalls);
+
+    // Auto-split if content exceeds limit and we have accumulated content to split on
+    if (content.length > CARD_CONTENT_LIMIT && state.accumulatedContent.length > 0) {
+      this.splitCard(chatId);
+      return;
+    }
+
     state.sequence++;
     const seq = state.sequence;
     const cardId = state.cardId;
@@ -454,7 +498,7 @@ export class FeishuClient {
     }
     const state = this.activeCards.get(chatId);
     if (!state) return;
-    // Preserve existing tool calls not in the incoming list (e.g., completed tools from previous cycles)
+    // Preserve existing tool calls not in the incoming list
     const existing = state.toolCalls.filter((tc) => !tools.some((t) => t.id === tc.id));
     // Preserve approved flag from existing tool calls
     const merged = tools.map((tc) => {
@@ -466,6 +510,23 @@ export class FeishuClient {
     });
     state.toolCalls = [...existing, ...merged];
     this.updateCardContent(chatId, state.pendingText || '');
+  }
+
+  onToolEvent(chatId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>): void {
+    const tools: ToolCallInfo[] = [];
+    if (toolName) {
+      tools.push({ id: toolId, name: toolName, status, input });
+    } else {
+      // Status-only update — get existing tool name
+      const state = this.activeCards.get(chatId);
+      const existing = state?.toolCalls.find((tc) => tc.id === toolId);
+      if (existing) {
+        existing.status = status;
+        this.updateCardContent(chatId, state?.pendingText || '');
+        return;
+      }
+    }
+    this.updateToolProgress(chatId, tools);
   }
 
   async finalizeCard(
@@ -527,7 +588,7 @@ export class FeishuClient {
         footer.context = `${contextPct}%`;
       }
 
-      const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
+      const finalCardJson = buildFinalCardJson(state.accumulatedContent, responseText, state.toolCalls, footer);
       state.sequence++;
       await (this.restClient as any).cardkit.v1.card.update({
         path: { card_id: state.cardId },
@@ -580,10 +641,6 @@ export class FeishuClient {
     this.updateCardContent(chatId, fullText);
   }
 
-  onToolEvent(chatId: string, tools: ToolCallInfo[]): void {
-    this.updateToolProgress(chatId, tools);
-  }
-
   async onStreamEnd(
     chatId: string,
     status: 'completed' | 'interrupted' | 'error',
@@ -591,6 +648,127 @@ export class FeishuClient {
     tokenUsage?: TokenUsage | null,
   ): Promise<boolean> {
     return this.finalizeCard(chatId, status, responseText, tokenUsage);
+  }
+
+  /**
+   * Called when a tool-use cycle completes.
+   * Snapshots completed tools into accumulated content and appends a cycle marker.
+   */
+  onCycleComplete(chatId: string): void {
+    const state = this.activeCards.get(chatId);
+    if (!state) return;
+
+    const hadContent = (state.pendingText && state.pendingText.trim()) || state.toolCalls.length > 0;
+
+    // Snapshot current text into accumulated content (blank line between)
+    if (state.pendingText && state.pendingText.trim()) {
+      state.accumulatedContent = state.accumulatedContent
+        ? `${state.accumulatedContent}\n\n${state.pendingText}`
+        : state.pendingText;
+    }
+
+    // Snapshot completed tools into accumulated content (single newline)
+    if (state.toolCalls.length > 0) {
+      const toolMd = buildToolProgressMarkdown(state.toolCalls);
+      if (toolMd) {
+        state.accumulatedContent = state.accumulatedContent
+          ? `${state.accumulatedContent}\n${toolMd}`
+          : toolMd;
+      }
+    }
+
+    // Append elapsed time only if this cycle had content
+    if (hadContent) {
+      state.cycleCount++;
+      const elapsed = Date.now() - state.lastCycleStartAt;
+      state.accumulatedContent = state.accumulatedContent
+        ? `${state.accumulatedContent} (${formatElapsed(elapsed)})`
+        : `(${formatElapsed(elapsed)})`;
+    }
+
+    // Clear for next cycle
+    state.toolCalls = [];
+    state.pendingText = null;
+    state.lastCycleStartAt = Date.now();
+
+    // Trigger visual update to show the marker
+    this.updateCardContent(chatId, '');
+  }
+
+  /**
+   * Split the current card when content exceeds the size limit.
+   * Finalizes current card with "(continued)" footer and creates a new one.
+   */
+  private async splitCard(chatId: string): Promise<void> {
+    const state = this.activeCards.get(chatId);
+    if (!state || !this.restClient) return;
+
+    // Save state before finalization
+    const savedCycleCount = state.cycleCount;
+    const savedPendingText = state.pendingText;
+    const savedToolCalls = [...state.toolCalls];
+    const savedContent = state.accumulatedContent;
+
+    // Finalize current card with "(continued)" footer
+    this.activeCards.delete(chatId);
+    if (state.throttleTimer) {
+      clearTimeout(state.throttleTimer);
+      state.throttleTimer = null;
+    }
+
+    try {
+      state.sequence++;
+      await (this.restClient as any).cardkit.v1.card.settings({
+        path: { card_id: state.cardId },
+        data: {
+          settings: JSON.stringify({ config: { streaming_mode: false } }),
+          sequence: state.sequence,
+        },
+      });
+
+      const continuationCard = JSON.stringify({
+        schema: '2.0',
+        config: { wide_screen_mode: true },
+        body: {
+          elements: [
+            { tag: 'markdown', content: preprocessFeishuMarkdown(savedContent), text_align: 'left', text_size: 'normal' },
+            { tag: 'hr' },
+            { tag: 'markdown', content: '*... continued in next card*', text_size: 'notation' },
+          ],
+        },
+      });
+
+      state.sequence++;
+      await (this.restClient as any).cardkit.v1.card.update({
+        path: { card_id: state.cardId },
+        data: {
+          card: { type: 'card_json', data: continuationCard },
+          sequence: state.sequence,
+        },
+      });
+
+      console.log(`[feishu] Card split: cardId=${state.cardId}, contentLen=${savedContent.length}`);
+    } catch (err) {
+      console.warn('[feishu] Continuation card finalize failed:', err instanceof Error ? err.message : err);
+    }
+
+    // Create new streaming card for remaining content
+    const msgId = this.lastIncomingMessageId.get(chatId);
+    if (msgId) {
+      const created = await this.createStreamingCard(chatId, msgId);
+      if (created) {
+        const newState = this.activeCards.get(chatId);
+        if (newState) {
+          newState.cycleCount = savedCycleCount;
+          newState.pendingText = savedPendingText;
+          newState.toolCalls = savedToolCalls;
+          newState.accumulatedContent = '';
+          if (savedPendingText || savedToolCalls.length > 0) {
+            this.updateCardContent(chatId, savedPendingText || '');
+          }
+        }
+      }
+    }
   }
 
   // ── Send (3-layer degradation) ─────────────────────────────
@@ -736,8 +914,9 @@ export class FeishuClient {
         },
       });
 
-      // Replace card with response text + tool progress + permission buttons
+      // Replace card with accumulated + response text + tool progress + permission buttons
       const cardJson = buildStreamingPermissionCard(
+        state.accumulatedContent,
         state.pendingText || '',
         state.toolCalls,
         permMdText,
@@ -762,6 +941,8 @@ export class FeishuClient {
         sequence: state.sequence,
         pendingText: state.pendingText || '',
         toolCalls: [...state.toolCalls],
+        accumulatedContent: state.accumulatedContent,
+        cycleCount: state.cycleCount,
       });
       return { ok: true, messageId: state.messageId };
     } catch (err) {
@@ -865,7 +1046,7 @@ export class FeishuClient {
           if (action === 'allow') {
             return { ...tc, status: 'running' as const, approved: true };
           }
-          return { ...tc, status: 'error' as const };
+          return { ...tc, status: 'error' as const, denied: true };
         }
         return tc;
       });
@@ -873,6 +1054,7 @@ export class FeishuClient {
       // Build card with resolved status but keep streaming_mode enabled
       // so continuation text updates this same card
       const cardJson = buildPermResolvedStreamingCard(
+        tracked.accumulatedContent,
         tracked.pendingText,
         updatedTools,
         '',
@@ -897,6 +1079,9 @@ export class FeishuClient {
         toolCalls: updatedTools,
         thinking: false,
         pendingText: tracked.pendingText || null,
+        accumulatedContent: tracked.accumulatedContent,
+        cycleCount: tracked.cycleCount,
+        lastCycleStartAt: Date.now(),
         lastUpdateAt: Date.now(),
         throttleTimer: null,
       });

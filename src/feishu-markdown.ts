@@ -8,6 +8,9 @@
 
 import type { ToolCallInfo } from './types.js';
 
+/** Safety margin below Feishu's ~28KB markdown element limit */
+export const CARD_CONTENT_LIMIT = 26_000;
+
 export function hasComplexMarkdown(text: string): boolean {
   if (/```[\s\S]*?```/.test(text)) return true;
   if (/\|.+\|[\r\n]+\|[-:| ]+\|/.test(text)) return true;
@@ -59,9 +62,11 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return '';
   const lines = tools.map((tc) => {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'error' ? '❌' : '✅';
-    const name = tc.approved ? `[approved] ${tc.name}` : tc.name;
     const detail = formatToolDetail(tc.name, tc.input);
-    return detail ? `${icon} \`${name}\` — ${detail}` : `${icon} \`${name}\``;
+    const base = detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
+    if (tc.approved) return `${base}\n[approved]`;
+    if ((tc as any).denied) return `${base}\n[denied]`;
+    return base;
   });
   return lines.join('\n');
 }
@@ -125,27 +130,37 @@ export function formatTokenCount(count: number): string {
   return `${Math.round(count / 1000)}K`;
 }
 
-export function buildStreamingContent(text: string, tools: ToolCallInfo[]): string {
-  let content = text || '';
+export function buildCycleMarker(cycleNumber: number, elapsedMs: number): string {
+  return `[cycle ${cycleNumber} complete ${formatElapsed(elapsedMs)}]`;
+}
+
+export function buildStreamingContent(accumulated: string, text: string, tools: ToolCallInfo[]): string {
+  const parts: string[] = [];
+  if (accumulated) parts.push(accumulated);
+  if (text && text.trim()) parts.push(text);
   const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
-  return content || '💭 Thinking...';
+  if (toolMd) parts.push(toolMd);
+  if (parts.length === 0) return '💭 Thinking...';
+  // No blank line between text and running tools; blank line only between accumulated and current content
+  return parts.length > 1 && accumulated
+    ? `${parts[0]}\n\n${parts.slice(1).join('\n')}`
+    : parts.join('\n');
 }
 
 export function buildFinalCardJson(
+  accumulated: string,
   text: string,
   tools: ToolCallInfo[],
   footer: { status: string; elapsed: string; tokens?: string; cost?: string; context?: string } | null,
 ): string {
   const elements: Array<Record<string, unknown>> = [];
 
-  let content = preprocessFeishuMarkdown(text);
+  const parts: string[] = [];
+  if (accumulated) parts.push(preprocessFeishuMarkdown(accumulated));
+  if (text && text.trim()) parts.push(preprocessFeishuMarkdown(text));
   const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
+  if (toolMd) parts.push(toolMd);
+  const content = parts.join('\n\n');
 
   if (content) {
     elements.push({
@@ -294,6 +309,7 @@ export function buildPermissionResolvedCard(
 }
 
 export function buildStreamingPermissionCard(
+  accumulated: string,
   responseText: string,
   tools: ToolCallInfo[],
   permText: string,
@@ -303,12 +319,13 @@ export function buildStreamingPermissionCard(
 ): string {
   const elements: Array<Record<string, unknown>> = [];
 
-  // Current response text + tool progress
-  let content = preprocessFeishuMarkdown(responseText);
+  // Accumulated + current response text + tool progress
+  const parts: string[] = [];
+  if (accumulated) parts.push(accumulated);
+  if (responseText && responseText.trim()) parts.push(preprocessFeishuMarkdown(responseText));
   const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
+  if (toolMd) parts.push(toolMd);
+  const content = parts.join('\n\n');
   if (content) {
     elements.push({ tag: 'markdown', content, text_align: 'left', text_size: 'normal' });
   }
@@ -339,16 +356,18 @@ export function buildStreamingPermissionCard(
  * overwritten by subsequent streaming updates anyway.
  */
 export function buildPermResolvedStreamingCard(
+  accumulated: string,
   responseText: string,
   tools: ToolCallInfo[],
   _permText: string,
   _action: 'allow' | 'deny',
 ): string {
-  let content = preprocessFeishuMarkdown(responseText);
+  const parts: string[] = [];
+  if (accumulated) parts.push(accumulated);
+  if (responseText && responseText.trim()) parts.push(preprocessFeishuMarkdown(responseText));
   const toolMd = buildToolProgressMarkdown(tools);
-  if (toolMd) {
-    content = content ? `${content}\n\n${toolMd}` : toolMd;
-  }
+  if (toolMd) parts.push(toolMd);
+  const content = parts.join('\n\n');
 
   return JSON.stringify({
     schema: '2.0',

@@ -107,10 +107,8 @@ test('FeishuClient streaming card lifecycle (create → update → finalize)', a
   await new Promise(r => setTimeout(r, 500));
 
   // Simulate tool progress
-  feishu.onToolEvent(chatId, [
-    { id: 'tool-1', name: 'Read', status: 'complete' },
-    { id: 'tool-2', name: 'Write', status: 'running' },
-  ]);
+  feishu.onToolEvent(chatId, 'tool-1', 'Read', 'complete');
+  feishu.onToolEvent(chatId, 'tool-2', 'Write', 'running');
   await new Promise(r => setTimeout(r, 500));
 
   // Finalize the card

@@ -11,7 +11,6 @@ import type {
   InboundMessage,
   ChannelBinding,
   CliSessionInfo,
-  ToolCallInfo,
 } from './types.js';
 import * as conversation from './conversation.js';
 import { deliver } from './delivery.js';
@@ -192,9 +191,6 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   // Handle callback queries (permission buttons)
   if (msg.callbackData) {
     const handled = await handlePermissionCallback(ctx, msg.callbackData, msg.chatId, msg.callbackMessageId);
-    if (handled) {
-      await deliver(ctx, msg.chatId, 'Permission response recorded.');
-    }
     return;
   }
 
@@ -273,57 +269,21 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   activeTasks.set(binding.codepilotSessionId, taskAbort);
 
   // Tool call tracker for streaming card
-  const toolCallTracker = new Map<string, ToolCallInfo>();
   let currentCycleText = '';
-  let firstTextSeen = false;
-  let cycleHasText = false;
-  let cardHasText = false; // tracks whether current active card has text from a previous cycle
-  let cycleEnded = false;  // set by onCycleComplete — signals next onPartialText is a new cycle
 
   const onPartialText = (fullText: string) => {
-    if (fullText.trim()) {
-      // Only finalize when starting a NEW cycle (after onCycleComplete), not during streaming
-      if (cycleEnded && cardHasText) {
-        // Previous cycle had text → finalize, start a new card
-        ctx.feishu.finalizeCard(msg.chatId, 'completed', currentCycleText, null).catch(() => {});
-        toolCallTracker.clear();
-        cardHasText = false;
-        currentCycleText = '';
-      } else if (!firstTextSeen && toolCallTracker.size > 0) {
-        // First text ever arriving after tool calls → finalize the tools-only card
-        ctx.feishu.finalizeCard(msg.chatId, 'completed', '', null).catch(() => {});
-        toolCallTracker.clear();
-      }
-      firstTextSeen = true;
-      cycleHasText = true;
-      cardHasText = true;
-      cycleEnded = false;
-    }
     currentCycleText = fullText;
     try { ctx.feishu.onStreamText(msg.chatId, fullText); } catch { /* non-critical */ }
   };
 
   const onToolEvent = (toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>) => {
-    if (toolName) {
-      toolCallTracker.set(toolId, { id: toolId, name: toolName, status, input });
-    } else {
-      const existing = toolCallTracker.get(toolId);
-      if (existing) {
-        existing.status = status;
-      }
-    }
     try {
-      ctx.feishu.onToolEvent(msg.chatId, Array.from(toolCallTracker.values()));
+      ctx.feishu.onToolEvent(msg.chatId, toolId, toolName, status, input);
     } catch { /* non-critical */ }
   };
 
   const onCycleComplete = () => {
-    // Don't finalize here — let the next cycle decide whether to merge or split.
-    // Tool-only cycles merge into the current card; text-bearing cycles start a new card
-    // via the cardHasText check in onPartialText.
-    toolCallTracker.clear();
-    cycleHasText = false;
-    cycleEnded = true;
+    try { ctx.feishu.onCycleComplete(msg.chatId); } catch { /* non-critical */ }
   };
 
   try {

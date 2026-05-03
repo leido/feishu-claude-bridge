@@ -147,6 +147,7 @@ async function consumeStream(
   let currentText = '';
   let previewText = '';
   let tokenUsage: TokenUsage | null = null;
+  const pendingToolIds = new Set<string>();
   let hasError = false;
   let errorMessage = '';
   const seenToolResultIds = new Set<string>();
@@ -191,6 +192,7 @@ async function consumeStream(
                 name: toolData.name,
                 input: toolData.input,
               });
+              pendingToolIds.add(toolData.id);
               if (onToolEvent) {
                 try { onToolEvent(toolData.id, toolData.name, 'running', toolData.input); } catch { /* non-critical */ }
               }
@@ -221,10 +223,14 @@ async function consumeStream(
                   onToolEvent(resultData.tool_use_id, '', resultData.is_error ? 'error' : 'complete');
                 } catch { /* non-critical */ }
               }
-              // Cycle boundary: finalize current card and start fresh
-              previewText = '';
-              if (onCycleComplete) {
-                try { onCycleComplete(); } catch { /* non-critical */ }
+              // Only trigger cycle complete when all pending tools have finished
+              pendingToolIds.delete(resultData.tool_use_id);
+              if (pendingToolIds.size === 0) {
+                // Cycle boundary: finalize current card and start fresh
+                previewText = '';
+                if (onCycleComplete) {
+                  try { onCycleComplete(); } catch { /* non-critical */ }
+                }
               }
             } catch { /* skip */ }
             break;

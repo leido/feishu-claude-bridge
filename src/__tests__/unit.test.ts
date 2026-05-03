@@ -185,19 +185,25 @@ describe('feishu-markdown', async () => {
   });
 
   test('buildStreamingContent returns thinking placeholder when empty', () => {
-    assert.equal(buildStreamingContent('', []), '💭 Thinking...');
+    assert.equal(buildStreamingContent('', '', []), '💭 Thinking...');
   });
 
   test('buildStreamingContent includes text and tools', () => {
-    const content = buildStreamingContent('hello', [
+    const content = buildStreamingContent('', 'hello', [
       { id: '1', name: 'Read', status: 'running' },
     ]);
     assert.ok(content.includes('hello'));
     assert.ok(content.includes('Read'));
   });
 
+  test('buildStreamingContent includes accumulated content', () => {
+    const content = buildStreamingContent('prev cycle text', 'current text', []);
+    assert.ok(content.includes('prev cycle text'));
+    assert.ok(content.includes('current text'));
+  });
+
   test('buildFinalCardJson returns valid card JSON', () => {
-    const json = buildFinalCardJson('response text', [], {
+    const json = buildFinalCardJson('', 'response text', [], {
       status: '✅ Completed',
       elapsed: '2.1s',
       tokens: '↓1K ↑500',
@@ -213,9 +219,9 @@ describe('feishu-markdown', async () => {
     assert.equal(parsed.schema, '2.0');
     assert.ok(parsed.header);
     assert.ok(parsed.body.elements.length > 0);
-    // Should contain column_set with buttons
-    const columnSet = parsed.body.elements.find((e: any) => e.tag === 'column_set');
-    assert.ok(columnSet, 'Should have column_set with buttons');
+    // Should contain button elements
+    const buttons = parsed.body.elements.filter((e: any) => e.tag === 'button');
+    assert.ok(buttons.length >= 2, 'Should have at least Allow and Deny buttons');
   });
 });
 
