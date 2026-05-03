@@ -93,7 +93,7 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
       });
       const suffix =
         todos.length > 8 ? `\n> ... +${todos.length - 8} more` : "";
-      return `${icon} \`${tc.name}\` (${todos.length})\n${taskLines.join("\n")}${suffix}`;
+      return `${icon} \`${tc.name}\` (${todos.length})\n${taskLines.join("\n")}${suffix}\n`;
     }
 
     const detail = formatToolDetail(tc.name, tc.input);
@@ -109,11 +109,12 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
         `${base}\n` +
         [`> ⚠️ ${errLines[0]}`, ...errLines.slice(1).map((l) => `> ${l}`)].join(
           "\n",
-        )
+        ) +
+        "\n"
       );
     }
-    if (tc.approved) return `${base}\n> [approved]`;
-    if ((tc as any).denied) return `${base}\n> [denied]`;
+    if (tc.approved) return `${base}\n> [approved]\n`;
+    if ((tc as any).denied) return `${base}\n> [denied]\n`;
     return base;
   });
   return lines.join("\n");
