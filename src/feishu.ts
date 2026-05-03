@@ -51,6 +51,8 @@ interface CardState {
   messageId: string;
   sequence: number;
   startTime: number;
+  /** When the first card for this task was created (preserved across splits). */
+  originalStartTime: number;
   toolCalls: ToolCallInfo[];
   thinking: boolean;
   pendingText: string | null;
@@ -411,17 +413,19 @@ export class FeishuClient {
         return false;
       }
 
+      const now = Date.now();
       this.activeCards.set(chatId, {
         cardId,
         messageId,
         sequence: 0,
-        startTime: Date.now(),
+        startTime: now,
+        originalStartTime: now,
         toolCalls: [],
         thinking: true,
         pendingText: null,
         accumulatedContent: '',
         cycleCount: 0,
-        lastCycleStartAt: Date.now(),
+        lastCycleStartAt: now,
         lastUpdateAt: 0,
         throttleTimer: null,
       });
@@ -575,7 +579,7 @@ export class FeishuClient {
         interrupted: '⚠️ Interrupted',
         error: '❌ Error',
       };
-      const elapsedMs = Date.now() - state.startTime;
+      const elapsedMs = Date.now() - state.originalStartTime;
       const footer: { status: string; elapsed: string; tokens?: string; cost?: string; context?: string } = {
         status: statusLabels[status] || status,
         elapsed: formatElapsed(elapsedMs),
@@ -717,6 +721,7 @@ export class FeishuClient {
     const savedPendingText = state.pendingText;
     const savedToolCalls = [...state.toolCalls];
     const savedContent = state.accumulatedContent;
+    const savedOriginalStartTime = state.originalStartTime;
 
     // Finalize current card with "(continued)" footer
     this.activeCards.delete(chatId);
@@ -772,6 +777,7 @@ export class FeishuClient {
           newState.pendingText = savedPendingText;
           newState.toolCalls = savedToolCalls;
           newState.accumulatedContent = '';
+          newState.originalStartTime = savedOriginalStartTime;
           if (savedPendingText || savedToolCalls.length > 0) {
             this.updateCardContent(chatId, savedPendingText || '');
           }
@@ -1226,11 +1232,13 @@ export class FeishuClient {
       });
 
       // Re-add to activeCards so continuation text streams here instead of creating a new card
+      const now = Date.now();
       this.activeCards.set(chatId, {
         cardId: tracked.cardId,
         messageId: tracked.messageId,
         sequence: tracked.sequence,
-        startTime: Date.now(),
+        startTime: now,
+        originalStartTime: now,
         toolCalls: updatedTools,
         thinking: false,
         pendingText: tracked.pendingText || null,

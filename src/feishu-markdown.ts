@@ -63,17 +63,17 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   const lines = tools.map((tc) => {
     const icon = tc.status === 'running' ? '🔄' : tc.status === 'error' ? '❌' : '✅';
 
-    // TodoWrite — render as task list
+    // TodoWrite — render as task list with quote indentation
     const n = tc.name.toLowerCase().replace(/_/g, '');
     if ((n === 'todowrite' || n === 'todoread') && tc.input && Array.isArray(tc.input.todos)) {
       const todos = tc.input.todos as Array<{ content: string; status: string; activeForm?: string }>;
       const taskLines = todos.slice(0, 8).map((t) => {
         const s = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔄' : '⬜';
         const text = t.content.length > 50 ? t.content.slice(0, 50) + '...' : t.content;
-        return `${s} ${text}`;
+        return `> ${s} ${text}`;
       });
-      const suffix = todos.length > 8 ? `\n  ... +${todos.length - 8} more` : '';
-      return `${icon} \`${tc.name}\` (${todos.length})\n  ${taskLines.join('\n  ')}${suffix}`;
+      const suffix = todos.length > 8 ? `\n> ... +${todos.length - 8} more` : '';
+      return `${icon} \`${tc.name}\` (${todos.length})\n${taskLines.join('\n')}${suffix}\n`;
     }
 
     const detail = formatToolDetail(tc.name, tc.input);
@@ -81,13 +81,13 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
     if (tc.status === 'error' && tc.error) {
       const oneLine = tc.error.replace(/\n+/g, ' ').trim();
       const errPreview = oneLine.length > 200 ? oneLine.slice(0, 200) + '...' : oneLine;
-      return `${base}\n  ⚠️ ${errPreview}`;
+      return `${base}\n> ⚠️ ${errPreview}\n`;
     }
-    if (tc.approved) return `${base}\n[approved]`;
-    if ((tc as any).denied) return `${base}\n[denied]`;
+    if (tc.approved) return `${base}\n> [approved]\n`;
+    if ((tc as any).denied) return `${base}\n> [denied]\n`;
     return base;
   });
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 export function formatToolDetail(name: string, input?: Record<string, unknown>): string {
