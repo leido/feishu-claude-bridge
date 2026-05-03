@@ -65,7 +65,8 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
     const detail = formatToolDetail(tc.name, tc.input);
     const base = detail ? `${icon} \`${tc.name}\` — ${detail}` : `${icon} \`${tc.name}\``;
     if (tc.status === 'error' && tc.error) {
-      const errPreview = tc.error.length > 200 ? tc.error.slice(0, 200) + '...' : tc.error;
+      const oneLine = tc.error.replace(/\n+/g, ' ').trim();
+      const errPreview = oneLine.length > 200 ? oneLine.slice(0, 200) + '...' : oneLine;
       return `${base}\n> ${errPreview}`;
     }
     if (tc.approved) return `${base}\n[approved]`;

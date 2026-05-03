@@ -79,7 +79,7 @@ Assembles `AppContext` → resolves Claude CLI path → starts `FeishuClient` �
 
 Reads `./config.env` from the project root (simple `KEY=VALUE` parser). Returns a `Config` object. The `CTI_HOME` constant (defaults to `.bridge/` under the project directory) is used for all runtime data.
 
-### `types.ts` (235 lines) — All type definitions
+### `types.ts` (251 lines) — All type definitions
 
 Central type file. Key types:
 - `AppContext` — dependency injection container (config, store, provider, permissions, feishu)
@@ -88,10 +88,12 @@ Central type file. Key types:
 - `SSEEvent` / `SSEEventType` — events from the LLM stream
 - `StreamChatParams` — parameters for `ClaudeProvider.streamChat()`
 - `ConversationResult` — return value from `conversation.processMessage()`
+- `ToolCallInfo` — tool call tracking with `status`, `error`, `approved`, `input`
 - `PermissionRequestInfo` / `PermissionResult` — permission flow types
+- `PermissionLinkRecord` — stored permission links with `questionMode` and `toolInput`
 - `CliSessionInfo` — metadata for discovered local CLI sessions
 
-### `feishu.ts` (~1,050 lines) — Feishu client
+### `feishu.ts` (~1,530 lines) — Feishu client
 
 The largest file. Handles all Feishu communication (includes `getWsReadyState()` for the watchdog):
 
@@ -104,25 +106,30 @@ The largest file. Handles all Feishu communication (includes `getWsReadyState()`
   - `createStreamingCard()` — creates card with `streaming_mode: true`, sends as message
   - `updateCardContent()` → `flushCardUpdate()` — throttled element content updates
   - `finalizeCard()` — disables streaming mode via `card.settings()`, then replaces full card via `card.update()`
+  - `updateToolProgress()` — merges tool call states, preserves `error` and `approved` flags
 - **3-layer send degradation**: `send()` → tries card → falls back to post → falls back to plain text
 - **Permission cards**: `sendPermissionCard()` — interactive card with Allow/Allow Session/Deny buttons
+  - Supports **multi-question AskUserQuestion** cards with per-question option buttons and `Q.O` numeric shortcuts (e.g. `1.2`)
+  - `resolvePermissionCard()` supports `finalize` option to disable streaming and finalize the card (used for ExitPlanMode)
+  - `updateMultiQuestionCard()` — updates answer state for multi-question cards
+- **Tool error display**: `onToolEvent()` receives error content and stores it in `ToolCallInfo.error`, rendered as blockquote in the card
 - **Typing indicator**: Adds/removes emoji reaction on the user's message
 - **Authorization**: Checks `feishuAllowedUsers` config (user ID or chat ID allowlist)
 - **Dedup**: In-memory `seenMessageIds` map (max 1000 entries)
 
-### `bridge.ts` (593 lines) — Message orchestrator
+### `bridge.ts` (644 lines) — Message orchestrator
 
 The main loop and command router:
 
 - **`runBridgeLoop()`**: Infinite loop calling `feishu.consumeOne()`. Routes to `handleMessage()`. Callbacks, slash commands, and numeric shortcuts are processed directly; regular messages go through `processWithSessionLock()`.
 - **Session locks**: Promise-chaining serialization per session. Each session's messages queue behind each other.
-- **`handleMessage()`**: Handles callback queries (permission buttons), numeric shortcuts (1/2/3), slash commands, and regular messages.
+- **`handleMessage()`**: Handles callback queries (permission buttons), numeric shortcuts (`1`/`2`/`3` and `Q.O` format for multi-question), slash commands, and regular messages.
 - **Slash commands**: `/help`, `/new`, `/bind`, `/list`, `/resume`, `/cwd`, `/mode`, `/status`, `/stop`, `/perm`
 - **`/list` cache**: Per-chat, 5-minute TTL, so `/resume 3` can reference the same list
-- **Tool call tracking**: `Map<string, ToolCallInfo>` built during streaming, passed to `feishu.onToolEvent()`
+- **Tool call tracking**: `Map<string, ToolCallInfo>` built during streaming, passed to `feishu.onToolEvent()` — includes error content for failed tools
 - **Active tasks**: `Map<string, AbortController>` for `/stop` cancellation
 
-### `claude-provider.ts` (514 lines) — Claude Agent SDK wrapper
+### `claude-provider.ts` (529 lines) — Claude Agent SDK wrapper
 
 - **CLI resolution**: `resolveClaudeCliPath()` checks `CTI_CLAUDE_CODE_EXECUTABLE` env, then PATH, then well-known locations. Validates version >= 2.x and required flags.
 - **`preflightCheck()`**: Runs `claude --version` and `claude --help` to verify compatibility.
@@ -133,19 +140,20 @@ The main loop and command router:
 - **Auth error classification**: `classifyAuthError()` detects CLI auth vs API auth errors and provides user-friendly messages.
 - **Environment isolation**: `buildSubprocessEnv()` strips `CLAUDECODE` env var to prevent recursive invocation.
 
-### `conversation.ts` (349 lines) — Conversation engine
+### `conversation.ts` (376 lines) — Conversation engine
 
 - **`processMessage()`**: Acquires session lock (600s TTL, renewed every 60s) → saves user message → builds `StreamChatParams` → calls `provider.streamChat()` → `consumeStream()` → saves assistant message → releases lock.
 - **`consumeStream()`**: Reads from the `ReadableStream`, parses SSE lines, accumulates text, tracks tool calls and results, captures `sdkSessionId` and `tokenUsage`, forwards permission requests.
+- **Tool error logging**: When `tool_result` has `is_error: true`, logs `[conversation] tool error: <name>` and the error detail (up to 500 chars) via `console.warn`. Also passes the error content to `onToolEvent` for card display.
 - **File attachments**: Persisted to `.codepilot-uploads/` in the working directory before being passed to the provider.
 
-### `permissions.ts` (199 lines) — Permission management
+### `permissions.ts` (461 lines) — Permission management
 
 - **`PendingPermissions` class**: `waitFor(toolUseID)` → Promise with 5-minute timeout. `resolve()` fulfills it. `denyAll()` for shutdown.
-- **`forwardPermissionRequest()`**: Builds markdown description, calls `feishu.sendPermissionCard()`, records a `PermissionLink` in the store.
-- **`handlePermissionCallback()`**: Parses `perm:action:id` callback data, validates chat/message match, marks link resolved, calls `pendingPerms.resolve()`.
+- **`forwardPermissionRequest()`**: Builds markdown description, calls `feishu.sendPermissionCard()`, records a `PermissionLink` in the store. Detects multi-question AskUserQuestion and passes `multiQuestionData` to the card builder.
+- **`handlePermissionCallback()`**: Parses `perm:action:id` callback data (including `perm:ans:Q:O:id` for multi-question answers), validates chat/message match, marks link resolved, calls `pendingPerms.resolve()`.
 
-### `store.ts` (401 lines) — JSON file persistence
+### `store.ts` (403 lines) — JSON file persistence
 
 In-memory Maps with write-through to JSON files in `.bridge/data/`:
 - `sessions.json` — bridge sessions
@@ -172,15 +180,18 @@ Scans `~/.claude/projects/<project>/<uuid>.jsonl` files:
 - Returns sorted by mtime, max 30 days old
 - Used by `/list` and `/resume` commands
 
-### `feishu-markdown.ts` (189 lines) — Markdown helpers
+### `feishu-markdown.ts` (540 lines) — Markdown helpers
 
 - **`hasComplexMarkdown()`**: Detects code blocks or tables → route to card rendering
-- **`buildCardContent()`**: Wraps markdown in a schema 2.0 card
-- **`buildPostContent()`**: Wraps markdown in a `post` message (for fallback)
-- **`htmlToFeishuMarkdown()`**: Basic HTML → Feishu markdown conversion
+- **`buildToolProgressMarkdown()`**: Renders tool call list with icons (🔄/✅/❌). Failed tools show error message as blockquote (newlines collapsed, truncated to 200 chars)
 - **`buildStreamingContent()`**: Combines text + tool progress for live card updates
 - **`buildFinalCardJson()`**: Full card body with response text + tool progress + footer (status, elapsed, tokens, cost, context %)
 - **`buildPermissionButtonCard()`**: Interactive card with Allow/Allow Session/Deny buttons
+- **`buildMultiQuestionCard()`**: Multi-question AskUserQuestion card with per-question option buttons
+- **`buildMultiQuestionStreamingCard()`**: Embedded multi-question card within active streaming card
+- **`buildStreamingPermissionCard()`**: Permission card embedded in active streaming card
+- **`buildPermResolvedStreamingCard()`**: Card after permission resolved, keeps streaming enabled
+- **`buildPermissionResolvedCard()`**: Standalone resolved permission card (Allowed/Denied header)
 
 ### `validators.ts` (71 lines) — Input validation
 
@@ -304,7 +315,7 @@ Configuration lives at the project root; all runtime data lives under `.bridge/`
 5. **The `@larksuiteoapi/node-sdk` types are incomplete**. Many calls use `(this.restClient as any).cardkit.v1.card.*` because the SDK doesn't have TypeScript definitions for CardKit v2 APIs. If the SDK adds types in a future version, these casts can be removed.
 
 6. **Tests are in `src/__tests__/`**:
-   - `unit.test.ts` — 55 tests, no network, tests validators/markdown/delivery/store/scanner
+   - `unit.test.ts` — 56 tests, no network, tests validators/markdown/delivery/store/scanner
    - `feishu-api.test.ts` — 5 tests, requires live Feishu credentials
    - `integration.test.ts` — 6 tests, requires live Feishu credentials, tests full send/card lifecycle
    - Tests use `node:test` runner. **Do not use `async describe()`** — it causes tests to silently skip. Use top-level `test()` with `before()`/`after()` hooks instead.

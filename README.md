@@ -8,6 +8,9 @@
 > - **权限审批嵌入卡片** — 权限请求嵌入到当前流式卡片内，审批后卡片继续流式更新（不产生重复卡片）
 > - **动态权限按钮** — 根据 SDK suggestions 动态生成按钮（Allow for session / Always allow 等），`updatedPermissions` 正确传递回 SDK
 > - **Tool 状态图标区分** — 🔄 运行中、✅ 正常完成、☑️ 审批通过、❌ 出错
+> - **Tool 错误详情展示** — 工具执行失败时，错误信息以引用块形式显示在卡片中，同时写入日志供排查
+> - **多问题权限卡片** — 支持 AskUserQuestion 多问题模式，每个问题独立按钮，支持 `1.2` 格式快捷回复
+> - **Plan 审批卡片终结** — ExitPlanMode 审批后卡片自动终结，后续执行文本在新卡片中展示
 > - **Tool-only cycle 合并** — 纯 tool 调用（无文字）的 cycle 不单独生成卡片，与后续文字合并为一张
 > - **修复类型错误** — `updatedPermissions` 类型正确传递、`resolve()` 签名扩展
 
