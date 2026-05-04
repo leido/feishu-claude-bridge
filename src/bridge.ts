@@ -24,7 +24,12 @@ import {
   sanitizeInput,
   validateMode,
 } from './validators.js';
-import { buildDirSelectCard, buildContinueSelectCard } from './feishu-markdown.js';
+import {
+  buildDirSelectCard,
+  buildDirSelectResolvedCard,
+  buildContinueSelectCard,
+  buildContinueSelectResolvedCard,
+} from './feishu-markdown.js';
 
 /** Extract unique working directories from recent CLI sessions, deduplicated. */
 function getRecentDirs(ctx: AppContext): string[] {
@@ -60,6 +65,9 @@ function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Pro
 
 const activeTasks = new Map<string, AbortController>();
 
+/** Slash commands handled locally by the bridge (others pass through to Claude). */
+const BRIDGE_COMMANDS = new Set(['/start', '/help', '/new', '/continue', '/mode', '/status', '/stop', '/perm']);
+
 // ── Resolve binding ──────────────────────────────────────────
 
 function resolveBinding(ctx: AppContext, chatId: string): ChannelBinding {
@@ -78,6 +86,7 @@ function createNewBinding(ctx: AppContext, chatId: string, workDir?: string): Ch
   return ctx.store.upsertChannelBinding({
     chatId,
     codepilotSessionId: session.id,
+    sdkSessionId: '',
     workingDirectory: cwd,
     model,
   });
@@ -138,10 +147,11 @@ export async function runBridgeLoop(ctx: AppContext): Promise<void> {
       const msg = await ctx.feishu.consumeOne();
       if (!msg) continue;
 
-      if (
-        msg.callbackData ||
-        msg.text.trim().startsWith('/')
-      ) {
+      const text = msg.text.trim();
+      const command = text.startsWith('/') ? text.split(/\s+/)[0].split('@')[0].toLowerCase() : '';
+      const isLocal = msg.callbackData || BRIDGE_COMMANDS.has(command);
+
+      if (isLocal) {
         await handleMessage(ctx, msg);
       } else {
         const binding = resolveBinding(ctx, msg.chatId);
@@ -185,10 +195,12 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
 
   if (!rawText && !hasAttachments) return;
 
-  // Slash commands
+  // Slash commands — bridge commands are handled locally;
+  // unrecognized commands pass through to Claude
   if (rawText.startsWith('/')) {
-    await handleCommand(ctx, msg, rawText);
-    return;
+    const handled = await handleCommand(ctx, msg, rawText);
+    if (handled) return;
+    // Fall through: send unrecognized command to Claude as prompt
   }
 
   // Sanitize
@@ -313,12 +325,18 @@ async function handleNewDirCallback(
   ctx: AppContext,
   chatId: string,
   idx: number,
-  _callbackMessageId?: string,
+  callbackMessageId?: string,
 ): Promise<void> {
   const dirs = getRecentDirs(ctx);
   if (idx < 0 || idx >= dirs.length) {
     await deliver(ctx, chatId, '选择已过期，请重新发送 /new');
     return;
+  }
+
+  // Update selection card to show resolved state
+  if (callbackMessageId) {
+    const resolvedCard = buildDirSelectResolvedCard(dirs[idx]);
+    await ctx.feishu.patchCardMessage(callbackMessageId, resolvedCard).catch(() => {});
   }
 
   // Abort existing session
@@ -342,7 +360,7 @@ async function handleContinueCallback(
   ctx: AppContext,
   chatId: string,
   idx: number,
-  _callbackMessageId?: string,
+  callbackMessageId?: string,
 ): Promise<void> {
   const sessions = ctx.store.listCliSessions({ limit: 5 });
   if (idx < 0 || idx >= sessions.length) {
@@ -351,6 +369,12 @@ async function handleContinueCallback(
   }
 
   const target = sessions[idx];
+
+  // Update selection card to show resolved state
+  if (callbackMessageId) {
+    const resolvedCard = buildContinueSelectResolvedCard(target.project, target.firstPrompt);
+    await ctx.feishu.patchCardMessage(callbackMessageId, resolvedCard).catch(() => {});
+  }
 
   // Abort running task
   const oldBinding = resolveBinding(ctx, chatId);
@@ -370,7 +394,7 @@ async function handleCommand(
   ctx: AppContext,
   msg: InboundMessage,
   text: string,
-): Promise<void> {
+): Promise<boolean> {
   const parts = text.split(/\s+/);
   const command = parts[0].split('@')[0].toLowerCase();
   const args = parts.slice(1).join(' ').trim();
@@ -380,7 +404,7 @@ async function handleCommand(
   if (dangerCheck.dangerous) {
     console.warn(`[bridge] Blocked dangerous input: ${dangerCheck.reason}`);
     await deliver(ctx, msg.chatId, 'Command rejected: invalid input detected.');
-    return;
+    return true;
   }
 
   let response = '';
@@ -394,13 +418,14 @@ async function handleCommand(
         'Send any message to interact with Claude.',
         '',
         '**Commands:**',
-        '/new [path] - Start new session (no args to pick dir)',
-        '/continue - Resume a recent session',
-        '/mode plan|code|ask - Change mode',
-        '/status - Show current status',
-        '/stop - Stop current session',
-        '/perm allow|allow_session|deny <id> - Permission response',
-        '/help - Show this help',
+        '`/new [path]` - Start new session (no args to pick dir)',
+        '`/continue` - Resume a recent session',
+        '`/mode plan|code|ask` - Change mode',
+        '`/status` - Show current status',
+        '`/stop` - Stop current session',
+        '`/perm allow|allow_session|deny <id>` - Permission response',
+        '`/clear` `/compact` etc. - Pass through to Claude Code',
+        '`/help` - Show this help',
       ].join('\n');
       break;
 
@@ -419,7 +444,7 @@ async function handleCommand(
         } else {
           const cardJson = buildDirSelectCard(dirs, msg.chatId);
           await ctx.feishu.sendInteractiveCard(msg.chatId, cardJson, msg.messageId);
-          return; // card sent, skip text response
+          return true; // card sent, skip text response
         }
         break;
       }
@@ -515,11 +540,12 @@ async function handleCommand(
       }
       const cardJson = buildContinueSelectCard(sessions, msg.chatId);
       await ctx.feishu.sendInteractiveCard(msg.chatId, cardJson, msg.messageId);
-      return; // card sent, skip text response
+      return true; // card sent, skip text response
     }
 
     default:
-      response = `Unknown command: ${command}\nType /help for available commands.`;
+      // Unrecognized command — pass through to Claude Code
+      return false;
   }
 
   if (response) {
@@ -528,4 +554,5 @@ async function handleCommand(
       replyToMessageId: msg.messageId,
     });
   }
+  return true;
 }

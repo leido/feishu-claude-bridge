@@ -58,9 +58,30 @@ export function htmlToFeishuMarkdown(html: string): string {
     .trim();
 }
 
+const MAX_VISIBLE_TOOL_CALLS = 5;
+
 export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
   if (tools.length === 0) return "";
-  const lines = tools.map((tc) => {
+
+  // When there are many tool calls, only show running + last N completed
+  let visible: ToolCallInfo[];
+  let collapsed = 0;
+  if (tools.length > MAX_VISIBLE_TOOL_CALLS) {
+    const running = tools.filter((tc) => tc.status === "running");
+    const rest = tools.filter((tc) => tc.status !== "running");
+    const tailCount = MAX_VISIBLE_TOOL_CALLS - running.length;
+    if (tailCount > 0 && rest.length > tailCount) {
+      collapsed = rest.length - tailCount;
+      visible = [...running, ...rest.slice(-tailCount)];
+    } else {
+      visible = [...running, ...rest.slice(-tailCount)];
+      collapsed = rest.length > tailCount ? rest.length - tailCount : 0;
+    }
+  } else {
+    visible = tools;
+  }
+
+  const lines = visible.map((tc) => {
     const icon =
       tc.status === "running" ? "🔄" : tc.status === "error" ? "❌" : "✅";
 
@@ -117,7 +138,9 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
     if ((tc as any).denied) return `${base}\n> [denied]\n`;
     return base;
   });
-  return lines.join("\n");
+
+  const prefix = collapsed > 0 ? `⋯ *+${collapsed} earlier tool calls*\n` : "";
+  return prefix + lines.join("\n");
 }
 
 export function formatToolDetail(
@@ -279,35 +302,27 @@ function buildPermButtons(
   permissionRequestId: string,
   chatId?: string,
   suggestions?: unknown[],
-): { elements: Array<Record<string, unknown>>; hints: string } {
+): { elements: Array<Record<string, unknown>> } {
   const buttons: Array<{ label: string; type: string; action: string }> = [
     { label: "Allow once", type: "primary_filled", action: "allow" },
   ];
-
-  const sugHints: string[] = ["`1` Allow once"];
 
   if (Array.isArray(suggestions)) {
     for (let i = 0; i < suggestions.length; i++) {
       const sug = suggestions[i] as PermissionSuggestion;
       if (sug._questionOption) {
-        // AskUserQuestion option — use the option's label as button text
         const label = (sug.label as string) || "_(unnamed)_";
-        const desc = sug.description as string | undefined;
-        const hint = desc ? `${label} — ${desc}` : label;
         buttons.push({ label, type: "primary", action: `sug:${i}` });
-        sugHints.push(`\`${i + 2}\` ${hint}`);
       } else {
         const label =
           DESTINATION_LABELS[sug.destination ?? ""] ??
           `Allow (${sug.destination ?? "unknown"})`;
         buttons.push({ label, type: "primary", action: `sug:${i}` });
-        sugHints.push(`\`${i + 2}\` ${label}`);
       }
     }
   }
 
   buttons.push({ label: "Deny", type: "danger", action: "deny" });
-  sugHints.push(`\`${buttons.length}\` Deny`);
 
   // Schema 2.0: buttons are direct elements with behaviors for callback
   const buttonElements = buttons.map((btn) => ({
@@ -327,8 +342,7 @@ function buildPermButtons(
     ],
   }));
 
-  const hints = `Or reply: ${sugHints.join(" · ")}`;
-  return { elements: buttonElements, hints };
+  return { elements: buttonElements };
 }
 
 // ── Multi-question AskUserQuestion card rendering ──────────────
@@ -351,9 +365,8 @@ function buildMultiQuestionPermButtons(
   chatId: string,
   questions: Question[],
   answers: Map<number, number>,
-): { elements: Array<Record<string, unknown>>; hints: string } {
+): { elements: Array<Record<string, unknown>> } {
   const elements: Array<Record<string, unknown>> = [];
-  const hintParts: string[] = [];
 
   for (let qi = 0; qi < questions.length; qi++) {
     const q = questions[qi];
@@ -393,7 +406,6 @@ function buildMultiQuestionPermButtons(
             },
           ],
         });
-        hintParts.push(`\`${qi + 1}.${oi + 1}\` ${opt.label ?? "_(unnamed)_"}`);
       }
     }
 
@@ -423,9 +435,7 @@ function buildMultiQuestionPermButtons(
     ],
   });
 
-  const hints =
-    hintParts.length > 0 ? `Or reply: ${hintParts.join(" · ")}` : "";
-  return { elements, hints };
+  return { elements };
 }
 
 export function buildMultiQuestionCard(
@@ -435,7 +445,7 @@ export function buildMultiQuestionCard(
   questions: Question[],
   answers: Map<number, number>,
 ): string {
-  const { elements: questionElements, hints } = buildMultiQuestionPermButtons(
+  const { elements: questionElements } = buildMultiQuestionPermButtons(
     permissionRequestId,
     chatId,
     questions,
@@ -447,12 +457,6 @@ export function buildMultiQuestionCard(
     { tag: "hr" },
     ...questionElements,
   ];
-  if (hints)
-    bodyElements.push({
-      tag: "markdown",
-      content: hints,
-      text_size: "notation",
-    });
 
   return JSON.stringify({
     schema: "2.0",
@@ -503,15 +507,13 @@ export function buildMultiQuestionStreamingCard(
   }
 
 
-  const { elements: questionElements, hints } = buildMultiQuestionPermButtons(
+  const { elements: questionElements } = buildMultiQuestionPermButtons(
     permissionRequestId,
     chatId,
     questions,
     answers,
   );
   elements.push(...questionElements);
-  if (hints)
-    elements.push({ tag: "markdown", content: hints, text_size: "notation" });
 
   return JSON.stringify({
     schema: "2.0",
@@ -531,7 +533,7 @@ export function buildPermissionButtonCard(
   chatId?: string,
   suggestions?: unknown[],
 ): string {
-  const { elements: buttonElements, hints } = buildPermButtons(
+  const { elements: buttonElements } = buildPermButtons(
     permissionRequestId,
     chatId,
     suggestions,
@@ -551,7 +553,6 @@ export function buildPermissionButtonCard(
         { tag: "markdown", content: text, text_size: "normal" },
         { tag: "hr" },
         ...buttonElements,
-        { tag: "markdown", content: hints, text_size: "notation" },
       ],
     },
   });
@@ -620,14 +621,13 @@ export function buildStreamingPermissionCard(
 
 
   // Buttons (reuse shared helper)
-  const { elements: buttonElements, hints } = buildPermButtons(
+  const { elements: buttonElements } = buildPermButtons(
     permissionRequestId,
     chatId,
     suggestions,
   );
   elements.push({ tag: "hr" });
   elements.push(...buttonElements);
-  elements.push({ tag: "markdown", content: hints, text_size: "notation" });
 
   return JSON.stringify({
     schema: "2.0",
@@ -704,14 +704,13 @@ export function buildPlanApprovalCard(
 
 
   // Buttons
-  const { elements: buttonElements, hints } = buildPermButtons(
+  const { elements: buttonElements } = buildPermButtons(
     permissionRequestId,
     chatId,
     suggestions,
   );
   elements.push({ tag: "hr" });
   elements.push(...buttonElements);
-  elements.push({ tag: "markdown", content: hints, text_size: "notation" });
 
   return JSON.stringify({
     schema: "2.0",
@@ -769,6 +768,54 @@ export function buildPlanApprovalResolvedCard(
 }
 
 // ── /new directory selection card ──────────────────────────
+
+export function buildDirSelectResolvedCard(selectedDir: string): string {
+  const basename = selectedDir.split("/").pop() || selectedDir;
+  return JSON.stringify({
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: "New Session" },
+      template: "green",
+      icon: { tag: "standard_icon", token: "check_filled" },
+      padding: "12px 12px 12px 12px",
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: `✅ 已选择：**${basename}**\n\`${selectedDir}\``,
+          text_size: "normal",
+        },
+      ],
+    },
+  });
+}
+
+// ── /continue session selection card ──────────────────────
+
+export function buildContinueSelectResolvedCard(project: string, prompt: string): string {
+  const preview = prompt.length > 50 ? prompt.slice(0, 50) + "..." : prompt;
+  return JSON.stringify({
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: "Continue Session" },
+      template: "green",
+      icon: { tag: "standard_icon", token: "check_filled" },
+      padding: "12px 12px 12px 12px",
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: `✅ 继续：**${project}**\n> "${preview}"`,
+          text_size: "normal",
+        },
+      ],
+    },
+  });
+}
 
 export function buildDirSelectCard(
   dirs: string[],

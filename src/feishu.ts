@@ -918,6 +918,23 @@ export class FeishuClient {
     }
   }
 
+  /**
+   * Patch an existing interactive card message with new card JSON.
+   */
+  async patchCardMessage(messageId: string, cardJson: string): Promise<boolean> {
+    if (!this.restClient) return false;
+    try {
+      await (this.restClient as any).im.message.patch({
+        path: { message_id: messageId },
+        data: { content: cardJson },
+      });
+      return true;
+    } catch (err) {
+      console.warn('[feishu] Failed to patch card message:', err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+
   // ── Permission Card ────────────────────────────────────────
 
   /**

@@ -124,13 +124,10 @@ export async function forwardPermissionRequest(
 
   if (toolName.toLowerCase() === 'askuserquestion' && (!suggestions || suggestions.length === 0)) {
     questionMode = classifyQuestionMode(toolInput);
-    if (questionMode === 'multi') {
-      // Multi-question: store toolInput for later answer resolution, no flat suggestions
-      toolInputJson = JSON.stringify(toolInput);
-      effectiveSuggestions = [];
-    } else {
-      effectiveSuggestions = extractQuestionOptions(toolInput);
-    }
+    // Store toolInput for all question modes so we can build updatedInput on answer
+    toolInputJson = JSON.stringify(toolInput);
+    // Use per-question ans: buttons for both single and multi — gives visual ✅ feedback on selection
+    effectiveSuggestions = [];
   }
 
   // ExitPlanMode: plan text is shown in the approval card body, skip perm markdown
@@ -138,7 +135,7 @@ export async function forwardPermissionRequest(
 
   // Build multi-question data if applicable
   const questions = Array.isArray(toolInput.questions) ? toolInput.questions as Question[] : [];
-  const multiQuestionData = questionMode === 'multi' ? { questions } : undefined;
+  const multiQuestionData = questionMode === 'multi' || questionMode === 'single' ? { questions } : undefined;
 
   // Send permission card with action buttons
   const result = await ctx.feishu.sendPermissionCard(chatId, mdText, permissionRequestId, replyToMessageId, effectiveSuggestions, multiQuestionData, toolName, toolInput);
@@ -291,13 +288,35 @@ export async function handlePermissionCallback(
 
     case 'sug': {
       let updatedPermissions: PermissionUpdate[] | undefined;
+      let updatedInput: Record<string, unknown> | undefined;
       if (link.suggestions) {
         try {
           const all = JSON.parse(link.suggestions) as Array<Record<string, unknown>>;
           if (Array.isArray(all) && suggestionIndex < all.length) {
             const sug = all[suggestionIndex];
-            // Skip updatedPermissions for AskUserQuestion option clicks
-            if (!sug._questionOption) {
+            if (sug._questionOption) {
+              // AskUserQuestion option — build answer from stored toolInput
+              if (link.toolInput) {
+                try {
+                  const origInput = JSON.parse(link.toolInput);
+                  const questions: Question[] = Array.isArray(origInput.questions) ? origInput.questions : [];
+                  // Find which question/option this suggestion index maps to
+                  let offset = 0;
+                  for (const q of questions) {
+                    const opts = q.options ?? [];
+                    if (suggestionIndex < offset + opts.length) {
+                      const opt = opts[suggestionIndex - offset];
+                      const answerMap: Record<string, string> = {
+                        [q.question ?? 'Question 1']: opt?.label ?? '',
+                      };
+                      updatedInput = { ...origInput, answers: answerMap };
+                      break;
+                    }
+                    offset += opts.length;
+                  }
+                } catch { /* fall through */ }
+              }
+            } else {
               updatedPermissions = [sug as unknown as PermissionUpdate];
             }
           }
@@ -306,6 +325,7 @@ export async function handlePermissionCallback(
       resolved = ctx.permissions.resolve(permissionRequestId, {
         behavior: 'allow',
         updatedPermissions,
+        ...(updatedInput ? { updatedInput } : {}),
       });
       break;
     }

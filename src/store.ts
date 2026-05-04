@@ -173,6 +173,7 @@ export class JsonFileStore {
       const updated: ChannelBinding = {
         ...existing,
         codepilotSessionId: data.codepilotSessionId,
+        ...(data.sdkSessionId !== undefined && { sdkSessionId: data.sdkSessionId }),
         workingDirectory: data.workingDirectory,
         model: data.model,
         updatedAt: now(),
