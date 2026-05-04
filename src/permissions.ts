@@ -2,7 +2,7 @@
  * Pending Permissions — Promise-based gateway for tool permission requests.
  *
  * waitFor() returns a promise that resolves when the IM user allows/denies.
- * 5-minute timeout auto-deny. denyAll() for graceful shutdown.
+ * No timeout — waits indefinitely until user responds. denyAll() for graceful shutdown.
  *
  * Also contains permission forwarding and callback handling logic
  * (merged from permission-broker.ts + permission-gateway.ts).
@@ -46,24 +46,17 @@ export function clearMultiQuestionAnswers(permissionRequestId: string): void {
 export class PendingPermissions {
   private pending = new Map<string, {
     resolve: (r: PermissionResult) => void;
-    timer: NodeJS.Timeout;
   }>();
-  private timeoutMs = 5 * 60 * 1000;
 
   waitFor(toolUseID: string): Promise<PermissionResult> {
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(toolUseID);
-        resolve({ behavior: 'deny', message: 'Permission request timed out' });
-      }, this.timeoutMs);
-      this.pending.set(toolUseID, { resolve, timer });
+      this.pending.set(toolUseID, { resolve });
     });
   }
 
   resolve(permissionRequestId: string, resolution: { behavior: 'allow' | 'deny'; message?: string; updatedPermissions?: unknown[]; updatedInput?: Record<string, unknown> }): boolean {
     const entry = this.pending.get(permissionRequestId);
     if (!entry) return false;
-    clearTimeout(entry.timer);
     if (resolution.behavior === 'allow') {
       entry.resolve({
         behavior: 'allow',
@@ -79,7 +72,6 @@ export class PendingPermissions {
 
   denyAll(): void {
     for (const [, entry] of this.pending) {
-      clearTimeout(entry.timer);
       entry.resolve({ behavior: 'deny', message: 'Bridge shutting down' });
     }
     this.pending.clear();

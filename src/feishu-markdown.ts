@@ -444,11 +444,6 @@ export function buildMultiQuestionCard(
 
   const bodyElements: Array<Record<string, unknown>> = [
     { tag: "markdown", content: text, text_size: "normal" },
-    {
-      tag: "markdown",
-      content: "⏱ Expires in 5 minutes",
-      text_size: "notation",
-    },
     { tag: "hr" },
     ...questionElements,
   ];
@@ -506,11 +501,7 @@ export function buildMultiQuestionStreamingCard(
   if (permText) {
     elements.push({ tag: "markdown", content: permText, text_size: "normal" });
   }
-  elements.push({
-    tag: "markdown",
-    content: "⏱ Expires in 5 minutes",
-    text_size: "notation",
-  });
+
 
   const { elements: questionElements, hints } = buildMultiQuestionPermButtons(
     permissionRequestId,
@@ -558,11 +549,6 @@ export function buildPermissionButtonCard(
     body: {
       elements: [
         { tag: "markdown", content: text, text_size: "normal" },
-        {
-          tag: "markdown",
-          content: "⏱ Expires in 5 minutes",
-          text_size: "notation",
-        },
         { tag: "hr" },
         ...buttonElements,
         { tag: "markdown", content: hints, text_size: "notation" },
@@ -631,11 +617,7 @@ export function buildStreamingPermissionCard(
   if (permText) {
     elements.push({ tag: "markdown", content: permText, text_size: "normal" });
   }
-  elements.push({
-    tag: "markdown",
-    content: "⏱ Expires in 5 minutes",
-    text_size: "notation",
-  });
+
 
   // Buttons (reuse shared helper)
   const { elements: buttonElements, hints } = buildPermButtons(
@@ -719,11 +701,7 @@ export function buildPlanApprovalCard(
   if (permText) {
     elements.push({ tag: "markdown", content: permText, text_size: "normal" });
   }
-  elements.push({
-    tag: "markdown",
-    content: "⏱ Expires in 5 minutes",
-    text_size: "notation",
-  });
+
 
   // Buttons
   const { elements: buttonElements, hints } = buildPermButtons(
@@ -784,6 +762,123 @@ export function buildPlanApprovalResolvedCard(
         tag: "standard_icon",
         token: action === "deny" ? "reject_filled" : "approve_filled",
       },
+      padding: "12px 12px 12px 12px",
+    },
+    body: { elements },
+  });
+}
+
+// ── /new directory selection card ──────────────────────────
+
+export function buildDirSelectCard(
+  dirs: string[],
+  chatId: string,
+): string {
+  const elements: Array<Record<string, unknown>> = [
+    { tag: "markdown", content: "**选择工作目录：**", text_size: "normal" },
+    { tag: "hr" },
+  ];
+
+  for (let i = 0; i < dirs.length; i++) {
+    const basename = dirs[i].split("/").pop() || dirs[i];
+    elements.push({
+      tag: "button",
+      type: "primary",
+      size: "medium",
+      width: "fill",
+      text: { tag: "plain_text", content: basename },
+      behaviors: [
+        {
+          type: "callback",
+          value: {
+            callback_data: `newdir:${i}`,
+            chatId,
+          },
+        },
+      ],
+    });
+  }
+
+  elements.push({ tag: "hr" });
+  elements.push({
+    tag: "markdown",
+    content: "或回复 `/new <路径>` 输入新路径",
+    text_size: "notation",
+  });
+
+  return JSON.stringify({
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: "New Session" },
+      template: "blue",
+      icon: { tag: "standard_icon", token: "create_filled" },
+      padding: "12px 12px 12px 12px",
+    },
+    body: { elements },
+  });
+}
+
+// ── /continue session selection card ──────────────────────
+
+export function buildContinueSelectCard(
+  sessions: Array<{
+    sdkSessionId: string;
+    project: string;
+    cwd: string;
+    firstPrompt: string;
+    isOpen: boolean;
+    timestamp: number;
+  }>,
+  chatId: string,
+): string {
+  const elements: Array<Record<string, unknown>> = [
+    { tag: "markdown", content: "**选择会话继续：**", text_size: "normal" },
+    { tag: "hr" },
+  ];
+
+  for (let i = 0; i < sessions.length; i++) {
+    const s = sessions[i];
+    const icon = s.isOpen ? "🟢" : "⚪";
+    const prompt =
+      s.firstPrompt.length > 30
+        ? s.firstPrompt.slice(0, 30) + "..."
+        : s.firstPrompt;
+    elements.push({
+      tag: "button",
+      type: s.isOpen ? "primary_filled" : "primary",
+      size: "medium",
+      width: "fill",
+      text: {
+        tag: "plain_text",
+        content: `${icon} ${s.project} — "${prompt}"`,
+      },
+      behaviors: [
+        {
+          type: "callback",
+          value: {
+            callback_data: `continue:${i}`,
+            chatId,
+          },
+        },
+      ],
+    });
+  }
+
+  elements.push({ tag: "hr" });
+  elements.push({
+    tag: "markdown",
+    content: "按钮文字 = 项目名 · 首条消息摘要",
+    text_size: "notation",
+  });
+
+  return JSON.stringify({
+    schema: "2.0",
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: "Continue Session" },
+      template: "turquoise",
+      icon: { tag: "standard_icon", token: "history_filled" },
       padding: "12px 12px 12px 12px",
     },
     body: { elements },

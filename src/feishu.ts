@@ -34,6 +34,8 @@ import {
   buildMultiQuestionStreamingCard,
   buildPlanApprovalCard,
   buildPlanApprovalResolvedCard,
+  buildDirSelectCard,
+  buildContinueSelectCard,
   buildToolProgressMarkdown,
   formatElapsed,
   formatTokenCount,
@@ -125,6 +127,7 @@ export class FeishuClient {
     accumulatedContent: string;
     cycleCount: number;
     lastCycleStartAt: number;
+    originalStartTime: number;
   }>();
   private resolvedPermissionChats = new Set<string>();
 
@@ -880,6 +883,41 @@ export class FeishuClient {
     }
   }
 
+  /**
+   * Send a raw interactive card JSON (e.g. button selection cards).
+   * Unlike send() which does markdown→card conversion, this takes pre-built card JSON.
+   */
+  async sendInteractiveCard(
+    chatId: string,
+    cardJson: string,
+    replyToMessageId?: string,
+  ): Promise<SendResult> {
+    if (!this.restClient) {
+      return { ok: false, error: 'Feishu client not initialized' };
+    }
+
+    try {
+      let res;
+      if (replyToMessageId) {
+        res = await this.restClient.im.message.reply({
+          path: { message_id: replyToMessageId },
+          data: { content: cardJson, msg_type: 'interactive' },
+        });
+      } else {
+        res = await this.restClient.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'interactive', content: cardJson },
+        });
+      }
+      if (res?.data?.message_id) {
+        return { ok: true, messageId: res.data.message_id };
+      }
+      return { ok: false, error: res?.msg || 'Send failed' };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Send failed' };
+    }
+  }
+
   // ── Permission Card ────────────────────────────────────────
 
   /**
@@ -969,6 +1007,7 @@ export class FeishuClient {
         accumulatedContent: state.accumulatedContent,
         cycleCount: state.cycleCount,
         lastCycleStartAt: state.lastCycleStartAt,
+        originalStartTime: state.originalStartTime,
       });
       return { ok: true, messageId: state.messageId };
     } catch (err) {
@@ -1039,6 +1078,7 @@ export class FeishuClient {
         console.log(`[feishu] Plan approval card sent: cardId=${cardId}, planTextLen=${planText.length}`);
 
         // Track for later resolution
+        const activeState = this.activeCards.get(chatId);
         this.permissionCardIds.set(permissionRequestId, {
           cardId: cardId || messageId,
           messageId,
@@ -1048,6 +1088,7 @@ export class FeishuClient {
           accumulatedContent: '',
           cycleCount: 0,
           lastCycleStartAt: Date.now(),
+          originalStartTime: activeState?.originalStartTime ?? Date.now(),
         });
 
         return { ok: true, messageId };
@@ -1233,7 +1274,7 @@ export class FeishuClient {
         messageId: tracked.messageId,
         sequence: tracked.sequence,
         startTime: now,
-        originalStartTime: now,
+        originalStartTime: tracked.originalStartTime,
         toolCalls: updatedTools,
         thinking: false,
         pendingText: tracked.pendingText || null,

@@ -337,11 +337,12 @@ describe('store', async () => {
 
   test('dedup check/insert/cleanup', () => {
     const store = new JsonFileStore(config);
-    assert.ok(!store.checkDedup('key-1'));
-    store.insertDedup('key-1');
-    assert.ok(store.checkDedup('key-1'));
+    const dedupKey = `dedup-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    assert.ok(!store.checkDedup(dedupKey));
+    store.insertDedup(dedupKey);
+    assert.ok(store.checkDedup(dedupKey));
     store.cleanupExpiredDedup(); // Shouldn't remove recent dedup
-    assert.ok(store.checkDedup('key-1'));
+    assert.ok(store.checkDedup(dedupKey));
   });
 
   test('permission links', () => {

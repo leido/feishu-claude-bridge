@@ -2,7 +2,7 @@
  * Bridge — message orchestrator for the Feishu-Claude bridge.
  *
  * Consumes inbound messages from FeishuClient, routes slash commands,
- * handles numeric permission shortcuts, and dispatches to the conversation engine.
+ * handles card action callbacks, and dispatches to the conversation engine.
  * Uses per-session locks for concurrency control.
  */
 
@@ -20,32 +20,24 @@ import {
 } from './permissions.js';
 import {
   validateWorkingDirectory,
-  validateSessionId,
   isDangerousInput,
   sanitizeInput,
   validateMode,
 } from './validators.js';
-import { formatRelativeTime } from './session-scanner.js';
-import { htmlToFeishuMarkdown } from './feishu-markdown.js';
+import { buildDirSelectCard, buildContinueSelectCard } from './feishu-markdown.js';
 
-// ── /list cache (per-chat, 5 min TTL) ───────────────────────
-
-interface ListCacheEntry {
-  sessions: CliSessionInfo[];
-  cachedAt: number;
-}
-
-const LIST_CACHE_TTL = 5 * 60 * 1000;
-const listCache = new Map<string, ListCacheEntry>();
-
-function getCachedList(chatId: string): CliSessionInfo[] | null {
-  const entry = listCache.get(chatId);
-  if (!entry) return null;
-  if (Date.now() - entry.cachedAt > LIST_CACHE_TTL) {
-    listCache.delete(chatId);
-    return null;
+/** Extract unique working directories from recent CLI sessions, deduplicated. */
+function getRecentDirs(ctx: AppContext): string[] {
+  const sessions = ctx.store.listCliSessions({ limit: 50 });
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  for (const s of sessions) {
+    if (s.cwd && !seen.has(s.cwd)) {
+      seen.add(s.cwd);
+      dirs.push(s.cwd);
+    }
   }
-  return entry.sessions;
+  return dirs.slice(0, 5);
 }
 
 // ── Session locks ────────────────────────────────────────────
@@ -67,15 +59,6 @@ function processWithSessionLock(sessionId: string, fn: () => Promise<void>): Pro
 // ── Active tasks ─────────────────────────────────────────────
 
 const activeTasks = new Map<string, AbortController>();
-
-// ── Numeric permission shortcut check ────────────────────────
-
-function isNumericPermissionShortcut(ctx: AppContext, rawText: string, chatId: string): boolean {
-  const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (!/^\d+$/.test(normalized)) return false;
-  const pending = ctx.store.listPendingPermissionLinksByChat(chatId);
-  return pending.length > 0;
-}
 
 // ── Resolve binding ──────────────────────────────────────────
 
@@ -112,15 +95,6 @@ function computeSdkSessionUpdate(
 }
 
 // ── CLI Session Helpers ──────────────────────────────────────
-
-function findCliSession(ctx: AppContext, query: string): CliSessionInfo | null {
-  const sessions = ctx.store.listCliSessions({ limit: 50 });
-  const q = query.toLowerCase();
-  const byId = sessions.find(s => s.sdkSessionId.toLowerCase().startsWith(q));
-  if (byId) return byId;
-  const bySlug = sessions.find(s => s.slug.toLowerCase() === q);
-  return bySlug || null;
-}
 
 function resumeCliSession(ctx: AppContext, chatId: string, target: CliSessionInfo): string {
   const model = ctx.config.defaultModel || '';
@@ -166,8 +140,7 @@ export async function runBridgeLoop(ctx: AppContext): Promise<void> {
 
       if (
         msg.callbackData ||
-        msg.text.trim().startsWith('/') ||
-        isNumericPermissionShortcut(ctx, msg.text.trim(), msg.chatId)
+        msg.text.trim().startsWith('/')
       ) {
         await handleMessage(ctx, msg);
       } else {
@@ -188,8 +161,21 @@ export async function runBridgeLoop(ctx: AppContext): Promise<void> {
 // ── Message handler ──────────────────────────────────────────
 
 async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void> {
-  // Handle callback queries (permission buttons)
+  // Handle callback queries (card action buttons)
   if (msg.callbackData) {
+    // /new directory selection button
+    if (msg.callbackData.startsWith('newdir:')) {
+      const idx = parseInt(msg.callbackData.split(':')[1], 10);
+      await handleNewDirCallback(ctx, msg.chatId, idx, msg.callbackMessageId);
+      return;
+    }
+    // /continue session selection button
+    if (msg.callbackData.startsWith('continue:')) {
+      const idx = parseInt(msg.callbackData.split(':')[1], 10);
+      await handleContinueCallback(ctx, msg.chatId, idx, msg.callbackMessageId);
+      return;
+    }
+    // Permission button
     const handled = await handlePermissionCallback(ctx, msg.callbackData, msg.chatId, msg.callbackMessageId);
     return;
   }
@@ -198,72 +184,6 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   const hasAttachments = msg.attachments && msg.attachments.length > 0;
 
   if (!rawText && !hasAttachments) return;
-
-  // Numeric shortcut for permission replies
-  const normalized = rawText.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
-  if (/^\d+(\.\d+)?$/.test(normalized)) {
-    const pendingLinks = ctx.store.listPendingPermissionLinksByChat(msg.chatId);
-    if (pendingLinks.length === 1) {
-      const link = pendingLinks[0];
-      const permId = link.permissionRequestId;
-
-      // Multi-question mode: accept Q.O format (e.g. "1.2" = question 1, option 2)
-      if (link.questionMode === 'multi' && normalized.includes('.')) {
-        const match = normalized.match(/^(\d+)\.(\d+)$/);
-        if (match) {
-          const qIdx = parseInt(match[1]) - 1;
-          const oIdx = parseInt(match[2]) - 1;
-          const callbackData = `perm:ans:${qIdx}:${oIdx}:${permId}`;
-          const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
-          if (handled) {
-            await deliver(ctx, msg.chatId, `Q${qIdx + 1} option ${oIdx + 1}: recorded.`);
-          } else {
-            await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
-          }
-          return;
-        }
-      }
-
-      // Standard numeric shortcut: 1=allow, 2..N=suggestions, last=deny
-      if (/^\d+$/.test(normalized)) {
-        const sugCount = link.suggestions ? (() => { try { return JSON.parse(link.suggestions).length; } catch { return 0; } })() : 0;
-        const totalButtons = 1 + sugCount + 1; // allow + suggestions + deny
-        const num = parseInt(normalized, 10);
-
-        if (num >= 1 && num <= totalButtons) {
-          let callbackData: string;
-          let label: string;
-
-          if (num === 1) {
-            callbackData = `perm:allow:${permId}`;
-            label = 'Allow once';
-          } else if (num === totalButtons) {
-            callbackData = `perm:deny:${permId}`;
-            label = 'Deny';
-          } else {
-            const sugIdx = num - 2;
-            callbackData = `perm:sug:${sugIdx}:${permId}`;
-            label = `Suggestion ${sugIdx + 1}`;
-          }
-
-          const handled = await handlePermissionCallback(ctx, callbackData, msg.chatId);
-          if (handled) {
-            await deliver(ctx, msg.chatId, `${label}: recorded.`);
-          } else {
-            await deliver(ctx, msg.chatId, 'Permission not found or already resolved.');
-          }
-          return;
-        }
-      }
-    }
-    if (pendingLinks.length > 1) {
-      await deliver(ctx, msg.chatId,
-        `Multiple pending permissions (${pendingLinks.length}). Use /perm allow|sug <idx>|deny <id>`,
-      );
-      return;
-    }
-    // No pending → fall through as normal message
-  }
 
   // Slash commands
   if (rawText.startsWith('/')) {
@@ -387,6 +307,63 @@ async function handleMessage(ctx: AppContext, msg: InboundMessage): Promise<void
   }
 }
 
+// ── Card action callback handlers ──────────────────────────────
+
+async function handleNewDirCallback(
+  ctx: AppContext,
+  chatId: string,
+  idx: number,
+  _callbackMessageId?: string,
+): Promise<void> {
+  const dirs = getRecentDirs(ctx);
+  if (idx < 0 || idx >= dirs.length) {
+    await deliver(ctx, chatId, '选择已过期，请重新发送 /new');
+    return;
+  }
+
+  // Abort existing session
+  const oldBinding = resolveBinding(ctx, chatId);
+  const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
+  if (oldTask) {
+    oldTask.abort();
+    activeTasks.delete(oldBinding.codepilotSessionId);
+  }
+
+  const workDir = dirs[idx];
+  const binding = createNewBinding(ctx, chatId, workDir);
+  await deliver(ctx, chatId, [
+    'New session created.',
+    `Session: \`${binding.codepilotSessionId.slice(0, 8)}...\``,
+    `CWD: \`${binding.workingDirectory}\``,
+  ].join('\n'));
+}
+
+async function handleContinueCallback(
+  ctx: AppContext,
+  chatId: string,
+  idx: number,
+  _callbackMessageId?: string,
+): Promise<void> {
+  const sessions = ctx.store.listCliSessions({ limit: 5 });
+  if (idx < 0 || idx >= sessions.length) {
+    await deliver(ctx, chatId, '选择已过期，请重新发送 /continue');
+    return;
+  }
+
+  const target = sessions[idx];
+
+  // Abort running task
+  const oldBinding = resolveBinding(ctx, chatId);
+  const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
+  if (oldTask) {
+    oldTask.abort();
+    activeTasks.delete(oldBinding.codepilotSessionId);
+  }
+
+  const response = resumeCliSession(ctx, chatId, target);
+  await deliver(ctx, chatId, response);
+}
+
 // ── Slash commands ───────────────────────────────────────────
 
 async function handleCommand(
@@ -417,21 +394,44 @@ async function handleCommand(
         'Send any message to interact with Claude.',
         '',
         '**Commands:**',
-        '/new [path] - Start new session',
-        '/bind <session_id> - Bind to existing session',
-        '/list - Discover local CLI sessions',
-        '/resume <编号或ID> - Resume a CLI session',
-        '/cwd /path - Change working directory',
+        '/new [path] - Start new session (no args to pick dir)',
+        '/continue - Resume a recent session',
         '/mode plan|code|ask - Change mode',
         '/status - Show current status',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny <id> - Permission response',
-        '1/2/3 - Quick permission reply (single pending)',
         '/help - Show this help',
       ].join('\n');
       break;
 
     case '/new': {
+      if (!args) {
+        // No args: show directory selection card
+        const dirs = getRecentDirs(ctx);
+        if (dirs.length === 0) {
+          // No recent dirs, just create with default
+          const binding = createNewBinding(ctx, msg.chatId);
+          response = [
+            'New session created.',
+            `Session: \`${binding.codepilotSessionId.slice(0, 8)}...\``,
+            `CWD: \`${binding.workingDirectory || '~'}\``,
+          ].join('\n');
+        } else {
+          const cardJson = buildDirSelectCard(dirs, msg.chatId);
+          await ctx.feishu.sendInteractiveCard(msg.chatId, cardJson, msg.messageId);
+          return; // card sent, skip text response
+        }
+        break;
+      }
+
+      // Path argument provided
+      const validated = validateWorkingDirectory(args);
+      if (!validated) {
+        response = 'Invalid path. Must be an absolute path without traversal sequences.';
+        break;
+      }
+
+      // Abort existing session
       const oldBinding = resolveBinding(ctx, msg.chatId);
       const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
       if (oldTask) {
@@ -439,66 +439,12 @@ async function handleCommand(
         activeTasks.delete(oldBinding.codepilotSessionId);
       }
 
-      let workDir: string | undefined;
-      if (args) {
-        const validated = validateWorkingDirectory(args);
-        if (!validated) {
-          response = 'Invalid path. Must be an absolute path without traversal sequences.';
-          break;
-        }
-        workDir = validated;
-      }
-      const binding = createNewBinding(ctx, msg.chatId, workDir);
+      const binding = createNewBinding(ctx, msg.chatId, validated);
       response = [
         'New session created.',
         `Session: \`${binding.codepilotSessionId.slice(0, 8)}...\``,
-        `CWD: \`${binding.workingDirectory || '~'}\``,
+        `CWD: \`${binding.workingDirectory}\``,
       ].join('\n');
-      break;
-    }
-
-    case '/bind': {
-      if (!args) {
-        response = 'Usage: /bind <session_id>';
-        break;
-      }
-      if (!validateSessionId(args)) {
-        response = 'Invalid session ID format.';
-        break;
-      }
-      const session = ctx.store.getSession(args);
-      if (session) {
-        ctx.store.upsertChannelBinding({
-          chatId: msg.chatId,
-          codepilotSessionId: args,
-          workingDirectory: session.working_directory,
-          model: session.model,
-        });
-        response = `Bound to session \`${args.slice(0, 8)}...\``;
-      } else {
-        const cliSession = findCliSession(ctx, args);
-        if (cliSession) {
-          response = resumeCliSession(ctx, msg.chatId, cliSession);
-        } else {
-          response = 'Session not found.';
-        }
-      }
-      break;
-    }
-
-    case '/cwd': {
-      if (!args) {
-        response = 'Usage: /cwd /path/to/directory';
-        break;
-      }
-      const validatedPath = validateWorkingDirectory(args);
-      if (!validatedPath) {
-        response = 'Invalid path.';
-        break;
-      }
-      const binding = resolveBinding(ctx, msg.chatId);
-      ctx.store.updateChannelBinding(binding.id, { workingDirectory: validatedPath });
-      response = `Working directory set to \`${validatedPath}\``;
       break;
     }
 
@@ -561,74 +507,15 @@ async function handleCommand(
       break;
     }
 
-    case '/list': {
+    case '/continue': {
       const sessions = ctx.store.listCliSessions({ limit: 5 });
       if (sessions.length === 0) {
-        response = 'No local CLI sessions found.';
+        response = 'No recent sessions found.';
         break;
       }
-      listCache.set(msg.chatId, { sessions, cachedAt: Date.now() });
-
-      const lines = ['**本地 CLI 会话:**', ''];
-      for (let i = 0; i < sessions.length; i++) {
-        const s = sessions[i];
-        const icon = s.isOpen ? '🟢' : '⚪';
-        const prompt = s.firstPrompt.length > 40 ? s.firstPrompt.slice(0, 40) + '...' : s.firstPrompt;
-        const timeAgo = formatRelativeTime(s.timestamp);
-        lines.push(`${i + 1}. ${icon} \`${s.sdkSessionId.slice(0, 8)}\`  ${s.project}`);
-        lines.push(`   "${prompt}" (${timeAgo})`);
-      }
-      lines.push('');
-      lines.push('发送 /resume <编号> 恢复会话');
-      response = lines.join('\n');
-      break;
-    }
-
-    case '/resume': {
-      if (!args) {
-        response = 'Usage: /resume <编号或ID>\n先发送 /list 查看可用会话。';
-        break;
-      }
-
-      let target: CliSessionInfo | null = null;
-
-      const num = parseInt(args, 10);
-      if (!isNaN(num) && num > 0 && String(num) === args.trim()) {
-        const cached = getCachedList(msg.chatId);
-        if (cached && num <= cached.length) {
-          target = cached[num - 1];
-        } else {
-          const freshSessions = ctx.store.listCliSessions({ limit: 5 });
-          listCache.set(msg.chatId, { sessions: freshSessions, cachedAt: Date.now() });
-          if (num <= freshSessions.length) {
-            target = freshSessions[num - 1];
-          }
-        }
-        if (!target) {
-          response = `编号 ${num} 超出范围。发送 /list 查看可用会话。`;
-          break;
-        }
-      }
-
-      if (!target) {
-        target = findCliSession(ctx, args);
-      }
-
-      if (!target) {
-        response = `未找到匹配 "${args}" 的会话。\n发送 /list 查看可用会话。`;
-        break;
-      }
-
-      // Abort running task
-      const oldBinding = resolveBinding(ctx, msg.chatId);
-      const oldTask = activeTasks.get(oldBinding.codepilotSessionId);
-      if (oldTask) {
-        oldTask.abort();
-        activeTasks.delete(oldBinding.codepilotSessionId);
-      }
-
-      response = resumeCliSession(ctx, msg.chatId, target);
-      break;
+      const cardJson = buildContinueSelectCard(sessions, msg.chatId);
+      await ctx.feishu.sendInteractiveCard(msg.chatId, cardJson, msg.messageId);
+      return; // card sent, skip text response
     }
 
     default:
