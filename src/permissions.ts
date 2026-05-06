@@ -225,7 +225,7 @@ export async function handlePermissionCallback(
     const allAnswered = questions.length > 0 && questions.every((_, qi) => answers.has(qi));
 
     // Update card with selected state
-    await ctx.feishu.updateMultiQuestionCard(permissionRequestId, questions, answers, link.chatId).catch(() => {});
+    await ctx.feishu.updateQuestionCard(permissionRequestId, questions, answers, link.chatId).catch(() => {});
 
     if (allAnswered) {
       // Auto-submit: build answers map and resolve

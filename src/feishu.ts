@@ -1297,44 +1297,88 @@ export class FeishuClient {
         return true;
       }
 
-      // Normal mode: build card with resolved status but keep streaming_mode enabled
-      // so continuation text updates this same card
-      const cardJson = buildPermResolvedStreamingCard(
-        tracked.accumulatedContent,
-        tracked.pendingText,
-        updatedTools,
-        '',
-        action,
-      );
+      if (action === 'deny') {
+        // Deny: finalize the card with error status, do NOT re-add to activeCards
+        // The next user message will start a fresh card
+        tracked.sequence++;
+        await (this.restClient as any).cardkit.v1.card.settings({
+          path: { card_id: tracked.cardId },
+          data: {
+            settings: JSON.stringify({ config: { streaming_mode: false } }),
+            sequence: tracked.sequence,
+          },
+        });
 
-      tracked.sequence++;
-      await (this.restClient as any).cardkit.v1.card.update({
-        path: { card_id: tracked.cardId },
-        data: {
-          card: { type: 'card_json', data: cardJson },
+        const elapsedMs = Date.now() - tracked.originalStartTime;
+        const footer = {
+          status: '❌ Denied',
+          elapsed: formatElapsed(elapsedMs),
+        };
+        const finalCardJson = buildFinalCardJson(
+          tracked.accumulatedContent,
+          tracked.pendingText || '',
+          updatedTools,
+          footer,
+        );
+        tracked.sequence++;
+        await (this.restClient as any).cardkit.v1.card.update({
+          path: { card_id: tracked.cardId },
+          data: {
+            card: { type: 'card_json', data: finalCardJson },
+            sequence: tracked.sequence,
+          },
+        });
+
+        // Remove from activeCards and clean up timers
+        const activeState = this.activeCards.get(chatId);
+        if (activeState) {
+          if (activeState.throttleTimer) clearTimeout(activeState.throttleTimer);
+          if (activeState.heartbeatTimer) clearInterval(activeState.heartbeatTimer);
+          this.activeCards.delete(chatId);
+        }
+
+        console.log(`[feishu] Permission card denied & finalized: cardId=${tracked.cardId}, elapsed=${formatElapsed(elapsedMs)}`);
+      } else {
+        // Allow: build card with resolved status but keep streaming_mode enabled
+        // so continuation text updates this same card
+        const cardJson = buildPermResolvedStreamingCard(
+          tracked.accumulatedContent,
+          tracked.pendingText,
+          updatedTools,
+          '',
+          action,
+        );
+
+        tracked.sequence++;
+        await (this.restClient as any).cardkit.v1.card.update({
+          path: { card_id: tracked.cardId },
+          data: {
+            card: { type: 'card_json', data: cardJson },
+            sequence: tracked.sequence,
+          },
+        });
+
+        // Re-add to activeCards so continuation text streams here instead of creating a new card
+        const now = Date.now();
+        this.activeCards.set(chatId, {
+          cardId: tracked.cardId,
+          messageId: tracked.messageId,
           sequence: tracked.sequence,
-        },
-      });
+          startTime: now,
+          originalStartTime: tracked.originalStartTime,
+          toolCalls: updatedTools,
+          thinking: false,
+          pendingText: tracked.pendingText || null,
+          accumulatedContent: tracked.accumulatedContent,
+          cycleCount: tracked.cycleCount,
+          lastCycleStartAt: tracked.lastCycleStartAt,
+          lastUpdateAt: Date.now(),
+          throttleTimer: null,
+          heartbeatTimer: setInterval(() => this.flushCardUpdate(chatId), HEARTBEAT_INTERVAL_MS),
+        });
 
-      // Re-add to activeCards so continuation text streams here instead of creating a new card
-      const now = Date.now();
-      this.activeCards.set(chatId, {
-        cardId: tracked.cardId,
-        messageId: tracked.messageId,
-        sequence: tracked.sequence,
-        startTime: now,
-        originalStartTime: tracked.originalStartTime,
-        toolCalls: updatedTools,
-        thinking: false,
-        pendingText: tracked.pendingText || null,
-        accumulatedContent: tracked.accumulatedContent,
-        cycleCount: tracked.cycleCount,
-        lastCycleStartAt: tracked.lastCycleStartAt,
-        lastUpdateAt: Date.now(),
-        throttleTimer: null,
-      });
-
-      console.log(`[feishu] Permission card resolved & reactivated: cardId=${tracked.cardId}, action=${action}`);
+        console.log(`[feishu] Permission card resolved & reactivated: cardId=${tracked.cardId}, action=${action}`);
+      }
       return true;
     } catch (err) {
       console.warn('[feishu] Failed to update permission card resolved state:', err instanceof Error ? err.message : err);
