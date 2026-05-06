@@ -711,9 +711,19 @@ export class FeishuClient {
         : state.pendingText;
     }
 
-    // Snapshot completed tools into accumulated content (single newline)
-    if (state.toolCalls.length > 0) {
-      const toolMd = buildToolProgressMarkdown(state.toolCalls);
+    // Separate TodoWrite/TodoRead from other tools — todo tools persist across cycles
+    const todoTools = state.toolCalls.filter((tc) => {
+      const n = tc.name.toLowerCase().replace(/_/g, '');
+      return n === 'todowrite' || n === 'todoread';
+    });
+    const nonTodoTools = state.toolCalls.filter((tc) => {
+      const n = tc.name.toLowerCase().replace(/_/g, '');
+      return n !== 'todowrite' && n !== 'todoread';
+    });
+
+    // Snapshot non-todo tools into accumulated content (single newline)
+    if (nonTodoTools.length > 0) {
+      const toolMd = buildToolProgressMarkdown(nonTodoTools);
       if (toolMd) {
         state.accumulatedContent = state.accumulatedContent
           ? `${state.accumulatedContent}\n${toolMd}`
@@ -725,8 +735,8 @@ export class FeishuClient {
       state.cycleCount++;
     }
 
-    // Clear for next cycle
-    state.toolCalls = [];
+    // Clear for next cycle — keep only todo tools for cross-cycle persistence
+    state.toolCalls = todoTools;
     state.pendingText = null;
     state.lastCycleStartAt = Date.now();
 
