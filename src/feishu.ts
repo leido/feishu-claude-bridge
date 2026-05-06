@@ -30,8 +30,8 @@ import {
   buildPermissionButtonCard,
   buildStreamingPermissionCard,
   buildPermResolvedStreamingCard,
-  buildMultiQuestionCard,
-  buildMultiQuestionStreamingCard,
+  buildQuestionCard,
+  buildQuestionStreamingCard,
   buildPlanApprovalCard,
   buildPlanApprovalResolvedCard,
   buildDirSelectCard,
@@ -1015,7 +1015,7 @@ export class FeishuClient {
       // Build card: use multi-question layout if applicable
       let cardJson: string;
       if (multiQuestionData && multiQuestionData.questions.length > 0) {
-        cardJson = buildMultiQuestionStreamingCard(
+        cardJson = buildQuestionStreamingCard(
           state.accumulatedContent,
           state.pendingText || '',
           state.toolCalls,
@@ -1185,7 +1185,7 @@ export class FeishuClient {
     // Fallback: send as a separate card
     let cardJson: string;
     if (multiQuestionData && multiQuestionData.questions.length > 0) {
-      cardJson = buildMultiQuestionCard(mdText, permissionRequestId, chatId, multiQuestionData.questions, new Map());
+      cardJson = buildQuestionCard(mdText, permissionRequestId, chatId, multiQuestionData.questions, new Map());
     } else {
       cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, suggestions);
     }
@@ -1343,7 +1343,7 @@ export class FeishuClient {
   }
 
   /** Update a multi-question permission card with current answer state. */
-  async updateMultiQuestionCard(
+  async updateQuestionCard(
     permissionRequestId: string,
     questions: Array<{ question?: string; header?: string; options?: Array<{ label?: string; description?: string }>; multiSelect?: boolean }>,
     answers: Map<number, number>,
@@ -1353,7 +1353,7 @@ export class FeishuClient {
     if (!tracked || !this.restClient) return false;
 
     try {
-      const cardJson = buildMultiQuestionStreamingCard(
+      const cardJson = buildQuestionStreamingCard(
         tracked.accumulatedContent,
         tracked.pendingText,
         tracked.toolCalls,

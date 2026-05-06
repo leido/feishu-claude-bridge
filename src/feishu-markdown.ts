@@ -406,7 +406,7 @@ interface Question {
   multiSelect?: boolean;
 }
 
-function buildMultiQuestionPermButtons(
+function buildQuestionPermButtons(
   permissionRequestId: string,
   chatId: string,
   questions: Question[],
@@ -484,14 +484,14 @@ function buildMultiQuestionPermButtons(
   return { elements };
 }
 
-export function buildMultiQuestionCard(
+export function buildQuestionCard(
   text: string,
   permissionRequestId: string,
   chatId: string,
   questions: Question[],
   answers: Map<number, number>,
 ): string {
-  const { elements: questionElements } = buildMultiQuestionPermButtons(
+  const { elements: questionElements } = buildQuestionPermButtons(
     permissionRequestId,
     chatId,
     questions,
@@ -517,7 +517,7 @@ export function buildMultiQuestionCard(
   });
 }
 
-export function buildMultiQuestionStreamingCard(
+export function buildQuestionStreamingCard(
   accumulated: string,
   responseText: string,
   tools: ToolCallInfo[],
@@ -553,7 +553,7 @@ export function buildMultiQuestionStreamingCard(
   }
 
 
-  const { elements: questionElements } = buildMultiQuestionPermButtons(
+  const { elements: questionElements } = buildQuestionPermButtons(
     permissionRequestId,
     chatId,
     questions,
