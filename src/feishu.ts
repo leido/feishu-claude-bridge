@@ -46,6 +46,7 @@ const DEDUP_MAX = 1000;
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const TYPING_EMOJI = 'Typing';
 const CARD_THROTTLE_MS = 200;
+const HEARTBEAT_INTERVAL_MS = 15_000;
 
 /** State for an active CardKit v2 streaming card. */
 interface CardState {
@@ -62,6 +63,7 @@ interface CardState {
   cycleCount: number;
   lastCycleStartAt: number;
   lastUpdateAt: number;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
   throttleTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -431,6 +433,7 @@ export class FeishuClient {
         lastCycleStartAt: now,
         lastUpdateAt: 0,
         throttleTimer: null,
+        heartbeatTimer: setInterval(() => this.flushCardUpdate(chatId), HEARTBEAT_INTERVAL_MS),
       });
 
       console.log(`[feishu] Streaming card created: cardId=${cardId}, msgId=${messageId}`);
@@ -472,7 +475,7 @@ export class FeishuClient {
     const state = this.activeCards.get(chatId);
     if (!state || !this.restClient) return;
 
-    const content = buildStreamingContent(state.accumulatedContent, state.pendingText || '', state.toolCalls);
+    const content = buildStreamingContent(state.accumulatedContent, state.pendingText || '', state.toolCalls, state.lastCycleStartAt, state.originalStartTime);
 
     // Auto-split if content exceeds limit and we have accumulated content to split on
     if (content.length > CARD_CONTENT_LIMIT && state.accumulatedContent.length > 0) {
@@ -511,7 +514,19 @@ export class FeishuClient {
     const state = this.activeCards.get(chatId);
     if (!state) return;
     // Preserve existing tool calls not in the incoming list
-    const existing = state.toolCalls.filter((tc) => !tools.some((t) => t.id === tc.id));
+    // If incoming includes TodoWrite, also remove previous TodoWrite entries (keep only latest)
+    const incomingIsTodo = tools.some((tc) => {
+      const n = tc.name.toLowerCase().replace(/_/g, '');
+      return n === 'todowrite' || n === 'todoread';
+    });
+    const existing = state.toolCalls.filter((tc) => {
+      if (tools.some((t) => t.id === tc.id)) return false;
+      if (incomingIsTodo) {
+        const n = tc.name.toLowerCase().replace(/_/g, '');
+        if (n === 'todowrite' || n === 'todoread') return false;
+      }
+      return true;
+    });
     // Preserve approved flag from existing tool calls
     const merged = tools.map((tc) => {
       const prev = state.toolCalls.find((p) => p.id === tc.id);
@@ -530,7 +545,16 @@ export class FeishuClient {
   onToolEvent(chatId: string, toolId: string, toolName: string, status: 'running' | 'complete' | 'error', input?: Record<string, unknown>, error?: string): void {
     const tools: ToolCallInfo[] = [];
     if (toolName) {
-      tools.push({ id: toolId, name: toolName, status, input, error });
+      const info: ToolCallInfo = { id: toolId, name: toolName, status, input, error, createdAt: Date.now() };
+      // Mark as subagent tool if a running Agent exists in the current cycle
+      const curState = this.activeCards.get(chatId);
+      if (curState && toolName.toLowerCase() !== 'agent') {
+        const hasRunningAgent = curState.toolCalls.some(
+          (tc) => tc.name.toLowerCase() === 'agent' && tc.status === 'running',
+        );
+        if (hasRunningAgent) info.isSubAgent = true;
+      }
+      tools.push(info);
     } else {
       // Status-only update — get existing tool name
       const state = this.activeCards.get(chatId);
@@ -565,6 +589,10 @@ export class FeishuClient {
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
+    }
+    if (state.heartbeatTimer) {
+      clearInterval(state.heartbeatTimer);
+      state.heartbeatTimer = null;
     }
 
     try {
@@ -726,6 +754,10 @@ export class FeishuClient {
     if (state.throttleTimer) {
       clearTimeout(state.throttleTimer);
       state.throttleTimer = null;
+    }
+    if (state.heartbeatTimer) {
+      clearInterval(state.heartbeatTimer);
+      state.heartbeatTimer = null;
     }
 
     try {

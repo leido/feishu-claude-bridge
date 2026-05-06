@@ -277,7 +277,7 @@ export async function handlePermissionCallback(
 
   // Update card FIRST (remove buttons, re-add to activeCards with approved flag)
   // This must complete before unblocking the SDK so that tool events can find the card
-  const shouldFinalize = resolveAction === 'allow' && link.toolName.toLowerCase() === 'exitplanmode';
+  const shouldFinalize = link.toolName.toLowerCase() === 'exitplanmode';
   await ctx.feishu.resolvePermissionCard(permissionRequestId, resolveAction, link.chatId, { finalize: shouldFinalize }).catch(() => {});
 
   // NOW unblock the SDK — tool execution starts, events will find the card in activeCards

@@ -156,6 +156,10 @@ export interface ToolCallInfo {
   input?: Record<string, unknown>;
   /** Error message when status is 'error' */
   error?: string;
+  /** True if this tool call belongs to a running Agent sub-agent */
+  isSubAgent?: boolean;
+  /** Timestamp when this tool call started (for elapsed time display) */
+  createdAt?: number;
 }
 
 // ── Permission ───────────────────────────────────────────────

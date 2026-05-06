@@ -60,15 +60,21 @@ export function htmlToFeishuMarkdown(html: string): string {
 
 const MAX_VISIBLE_TOOL_CALLS = 5;
 
-export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
+export function buildToolProgressMarkdown(tools: ToolCallInfo[], now?: number): string {
   if (tools.length === 0) return "";
+
+  // Separate subagent tools and compute Agent progress
+  const subAgentTools = tools.filter((tc) => tc.isSubAgent);
+  const nonSubAgentTools = tools.filter((tc) => !tc.isSubAgent);
+  const subTotal = subAgentTools.length;
+  const subCompleted = subAgentTools.filter((tc) => tc.status !== "running").length;
 
   // When there are many tool calls, only show running + last N completed
   let visible: ToolCallInfo[];
   let collapsed = 0;
-  if (tools.length > MAX_VISIBLE_TOOL_CALLS) {
-    const running = tools.filter((tc) => tc.status === "running");
-    const rest = tools.filter((tc) => tc.status !== "running");
+  if (nonSubAgentTools.length > MAX_VISIBLE_TOOL_CALLS) {
+    const running = nonSubAgentTools.filter((tc) => tc.status === "running");
+    const rest = nonSubAgentTools.filter((tc) => tc.status !== "running");
     const tailCount = MAX_VISIBLE_TOOL_CALLS - running.length;
     if (tailCount > 0 && rest.length > tailCount) {
       collapsed = rest.length - tailCount;
@@ -78,8 +84,19 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
       collapsed = rest.length > tailCount ? rest.length - tailCount : 0;
     }
   } else {
-    visible = tools;
+    visible = nonSubAgentTools;
   }
+
+  // Always render TodoWrite/TodoRead last
+  const todoItems = visible.filter((tc) => {
+    const n = tc.name.toLowerCase().replace(/_/g, '');
+    return n === 'todowrite' || n === 'todoread';
+  });
+  const nonTodoItems = visible.filter((tc) => {
+    const n = tc.name.toLowerCase().replace(/_/g, '');
+    return n !== 'todowrite' && n !== 'todoread';
+  });
+  visible = [...nonTodoItems, ...todoItems];
 
   const lines = visible.map((tc) => {
     const icon =
@@ -117,10 +134,25 @@ export function buildToolProgressMarkdown(tools: ToolCallInfo[]): string {
       return `${icon} \`${tc.name}\` (${todos.length})\n${taskLines.join("\n")}${suffix}\n`;
     }
 
+    // Agent — show description and subagent progress
+    if (n === "agent") {
+      const desc = tc.input?.description ? String(tc.input.description) : "";
+      const progress = subTotal > 0 ? ` [${subCompleted}/${subTotal}]` : "";
+      const elapsed = (now && tc.createdAt && now - tc.createdAt > 5000)
+        ? ` (${formatElapsed(now - tc.createdAt)})` : "";
+      return desc
+        ? `${icon} \`${tc.name}\` — ${desc}${progress}${elapsed}`
+        : `${icon} \`${tc.name}\`${progress}${elapsed}`;
+    }
+
     const detail = formatToolDetail(tc.name, tc.input);
     const base = detail
       ? `${icon} \`${tc.name}\` — ${detail}`
       : `${icon} \`${tc.name}\``;
+    // Show elapsed time for long-running tools
+    if (tc.status === "running" && now && tc.createdAt && now - tc.createdAt > 5000) {
+      return `${base} (${formatElapsed(now - tc.createdAt)})`;
+    }
     if (tc.status === "error" && tc.error) {
       const oneLine = tc.error.replace(/\n+/g, " ").trim();
       const errPreview =
@@ -216,18 +248,32 @@ export function buildStreamingContent(
   accumulated: string,
   text: string,
   tools: ToolCallInfo[],
+  cycleStartedAt?: number,
+  totalStartedAt?: number,
 ): string {
+  const now = Date.now();
   const parts: string[] = [];
   // Strip trailing newlines so the separator adds exactly one blank line
   if (accumulated) parts.push(accumulated.replace(/\n+$/, ""));
   if (text && text.trim()) parts.push(text);
-  const toolMd = buildToolProgressMarkdown(tools);
+  const toolMd = buildToolProgressMarkdown(tools, now);
   if (toolMd) parts.push(toolMd);
-  if (parts.length === 0) return "💭 Thinking...";
+
+  // Footer with elapsed time
+  const footerParts: string[] = [];
+  footerParts.push("🔄 Running");
+  if (totalStartedAt) footerParts.push(`⏱ ${formatElapsed(now - totalStartedAt)}`);
+  const footer = footerParts.length > 0 ? `\n\n---\n${footerParts.join(" · ")}` : "";
+
+  if (parts.length === 0) {
+    const elapsed = cycleStartedAt ? now - cycleStartedAt : 0;
+    return (elapsed > 3000 ? `💭 Thinking... (${formatElapsed(elapsed)})` : "💭 Thinking...") + footer;
+  }
   // No blank line between text and running tools; blank line only between accumulated and current content
-  return parts.length > 1 && accumulated
+  const main = parts.length > 1 && accumulated
     ? `${parts[0]}\n\n${parts.slice(1).join("\n")}`
     : parts.join("\n");
+  return main + footer;
 }
 
 export function buildFinalCardJson(
