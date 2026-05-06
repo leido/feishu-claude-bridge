@@ -1014,7 +1014,7 @@ export class FeishuClient {
 
       // Build card: use multi-question layout if applicable
       let cardJson: string;
-      if (multiQuestionData && multiQuestionData.questions.length > 1) {
+      if (multiQuestionData && multiQuestionData.questions.length > 0) {
         cardJson = buildMultiQuestionStreamingCard(
           state.accumulatedContent,
           state.pendingText || '',
@@ -1184,7 +1184,7 @@ export class FeishuClient {
 
     // Fallback: send as a separate card
     let cardJson: string;
-    if (multiQuestionData && multiQuestionData.questions.length > 1) {
+    if (multiQuestionData && multiQuestionData.questions.length > 0) {
       cardJson = buildMultiQuestionCard(mdText, permissionRequestId, chatId, multiQuestionData.questions, new Map());
     } else {
       cardJson = buildPermissionButtonCard(mdText, permissionRequestId, chatId, suggestions);
